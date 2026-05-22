@@ -151,18 +151,17 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
     soft_val_exp = soft_val_kr.reshape(-1)                                 # [K_eff * n_rf]
 
     if selection == 'mean':
-        mixed_kr_mean = mixed_kr.view(K_eff, n_rf, *x.shape[1:]).mean(dim=0)
-        soft_val_mean = soft_val_exp.view(K_eff, n_rf).mean(dim=0)
-        new_x = torch.cat([rr_x, ff_x, fr_x, mixed_kr_mean], dim=0)
-        new_label_soft = torch.cat([rr_soft, ff_soft, fr_soft, soft_val_mean], dim=0)
+        new_x = torch.cat([rr_x, ff_x, fr_x, mixed_kr], dim=0)
+        new_label_soft = torch.cat([rr_soft, ff_soft, fr_soft, soft_val_exp], dim=0)
         new_label = torch.cat([
             torch.zeros(rr.sum().item(), dtype=y.dtype, device=x.device),
             torch.ones(n_ff, dtype=y.dtype, device=x.device) if n_ff > 0 else torch.empty(0, dtype=y.dtype, device=x.device),
             y[fr_idx] if n_fr > 0 else torch.empty(0, dtype=y.dtype, device=x.device),
-            torch.zeros(n_rf, dtype=y.dtype, device=x.device),
+            torch.zeros(K_eff * n_rf, dtype=y.dtype, device=x.device),
         ], dim=0)
         return {**data_dict, 'image': new_x, 'label': new_label,
-                'label_soft': new_label_soft}
+                'label_soft': new_label_soft, 'n_rf': n_rf,
+                'mixup_k': K_eff, 'mixup_selection': 'mean'}
 
     # ── Select candidate per rf-real (random or hardest) ──────────────────
     if selection == 'random':

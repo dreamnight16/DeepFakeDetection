@@ -227,7 +227,20 @@ class EffortDetector(nn.Module):
             y_soft = data_dict['label_soft']                # [B], values in [0,1]
             per_sample = -(y_soft * log_probs[:, 1] +
                            (1.0 - y_soft) * log_probs[:, 0])  # [B]
-            loss = per_sample.mean()
+            if data_dict.get('mixup_selection') == 'mean':
+                K = data_dict['mixup_k']
+                n_rf = data_dict.get('n_rf', 0)
+                mask_real = label == 0
+                mask_fake = label == 1
+                real_all = per_sample[mask_real]
+                # rr (real+real) first, then K * n_rf rf candidates
+                n_rr = len(real_all) - K * n_rf
+                rr_losses = real_all[:n_rr]
+                rf_losses = real_all[n_rr:].view(K, n_rf).mean(dim=0)  # [n_rf]
+                fake_losses = per_sample[mask_fake]
+                loss = torch.cat([rr_losses, rf_losses, fake_losses]).mean()
+            else:
+                loss = per_sample.mean()
         else:
             loss = self.loss_func(pred, label)
         # ─────────────────────────────────────────────────────────────────────
