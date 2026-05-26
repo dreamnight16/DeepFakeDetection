@@ -1,9 +1,2 @@
-models--*/
-weights/
-__pycache__/
-*.log
-*.pth
-*.pt
-*.ckpt
 DeepfakeBench/preprocessing/dataset_json/
 DeepfakeBench/preprocessing/dataset_json/

@@ -114,8 +114,8 @@ use_adaptive_threshold: true  # OWTTT dynamic threshold, set false to disable
 
 # Asymmetric Mixup
 use_mixup: true       # set true to enable, or pass --mixup_gamma on CLI
-mixup_mode: original  # 'original' = direct asymmetric_mixup, 'asymmetric' = K-candidate selection
-mixup_gamma: 1.0      # Asymmetry intensity: γ=1 → standard Mixup labels
+mixup_mode: asymmetric  # 'original' = direct asymmetric_mixup, 'asymmetric' = K-candidate selection
+mixup_gamma: 0.5      # Asymmetry intensity: γ=1 → standard Mixup labels
 mixup_k: 3            # K for multi-candidate mixup (only used when mixup_mode='asymmetric')
-mixup_alpha: 5.0      # Beta(alpha, alpha) — λ concentrates near 0.5
-mixup_selection: random  # 'hardest' or 'random' — ablation experiment (only used when mixup_mode='asymmetric')
+mixup_alpha: 10.0      # Beta(alpha, alpha) — λ concentrates near 0.5
+mixup_selection: hardest  # 'hardest' or 'random' — ablation experiment (only used when mixup_mode='asymmetric')

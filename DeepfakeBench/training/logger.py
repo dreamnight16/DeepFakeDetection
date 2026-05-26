@@ -1,4 +1,4 @@
-from math import dist
+import torch.distributed as dist
 import os
 import logging
 

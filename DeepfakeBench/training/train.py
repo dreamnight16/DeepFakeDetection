@@ -50,8 +50,8 @@ parser.add_argument('--local_rank', type=int, default=0)
 parser.add_argument('--mixup_gamma', type=float, default=None,
                     help='Asymmetric Mixup gamma (overrides YAML). Enables mixup when set.')
 args = parser.parse_args()
-#torch.cuda.set_device(args.local_rank)
-torch.cuda.set_device(1)
+args.local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
+torch.cuda.set_device(args.local_rank)
 
 
 def init_seed(config):

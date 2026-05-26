@@ -31,7 +31,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from sklearn import metrics
 from metrics.utils import get_test_metrics
 
-from optimizor.sam import SAM
+from optimizor.SAM import SAM
 from optimizor.pcgrad import PCGrad
 
 FFpp_pool=['FaceForensics++','FF-DF','FF-F2F','FF-FS','FF-NT']#
@@ -266,7 +266,7 @@ class Trainer(object):
             num_gpus = torch.cuda.device_count()
             print(f'avai gpus: {num_gpus}')
             # local_rank=[i for i in range(0,num_gpus)]
-            self.model = DDP(self.model, device_ids=[self.config['local_rank']],find_unused_parameters=True, output_device=self.config['local_rank'])
+            self.model = DDP(self.model, device_ids=[self.config['local_rank']], find_unused_parameters=True, static_graph=True, output_device=self.config['local_rank'])
             #self.optimizer =  nn.DataParallel(self.optimizer, device_ids=[int(os.environ['LOCAL_RANK'])])
 
     def setTrain(self):
