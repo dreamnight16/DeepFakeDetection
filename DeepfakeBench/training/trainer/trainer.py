@@ -228,30 +228,38 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
 _FREQ_MASK_CACHE = {}
 
 def _get_freq_masks(h, w, cutoff, device):
-    """Cached circular low/high-pass masks. Returns (mask_low, mask_high) as [H, W]."""
-    key = (h, w, cutoff)
+    """Cached circular low/high-pass masks (post-fftshift coordinates).
+
+    Low frequencies are at the center of the spectrum after fftshift.
+    Returns (mask_low, mask_high) as [H, W] on the target device.
+    """
+    key = (h, w, round(cutoff, 5), device.index if device.type == 'cuda' else -1)
     if key not in _FREQ_MASK_CACHE:
-        r = cutoff * min(h, w)
-        ys = torch.arange(h).float()
-        xs = torch.arange(w).float()
+        # Nyquist-relative radius: r = cutoff * min(H,W) / 2
+        r = cutoff * min(h, w) / 2.0
+        ys = torch.arange(h, device=device).float()
+        xs = torch.arange(w, device=device).float()
         yv, xv = torch.meshgrid(ys, xs, indexing='ij')
+        # Centre of the *fftshifted* spectrum is at (h/2, w/2)
         dist = torch.sqrt((yv - h / 2.0) ** 2 + (xv - w / 2.0) ** 2)
         mask_low = (dist <= r).float()
         mask_high = 1.0 - mask_low
         _FREQ_MASK_CACHE[key] = (mask_low, mask_high)
-    mask_low, mask_high = _FREQ_MASK_CACHE[key]
-    return mask_low.to(device), mask_high.to(device)
+    return _FREQ_MASK_CACHE[key]
 
 
 def decompose_fft(x, cutoff=0.125):
     """Decompose images into low-freq and high-freq components via FFT.
 
+    Uses fftshift so the mask centre aligns with the DC component.
+    Restores the original value range via clamp.
+
     Args:
         x: [N, C, H, W]
-        cutoff: frequency cutoff fraction
+        cutoff: frequency cutoff fraction (relative to Nyquist radius)
 
     Returns:
-        x_low: [N, C, H, W]  — low-freq component (semantic structure)
+        x_low:  [N, C, H, W] — low-freq component (semantic structure)
         x_high: [N, C, H, W] — high-freq component (texture / artifact)
     """
     N, C, H, W = x.shape
@@ -259,9 +267,9 @@ def decompose_fft(x, cutoff=0.125):
     masks_low = mask_low.view(1, 1, H, W)
     masks_high = mask_high.view(1, 1, H, W)
 
-    x_fft = torch.fft.fft2(x)
-    x_low  = torch.fft.ifft2(x_fft * masks_low).real
-    x_high = torch.fft.ifft2(x_fft * masks_high).real
+    x_fft = torch.fft.fftshift(torch.fft.fft2(x), dim=(-2, -1))
+    x_low  = torch.fft.ifft2(torch.fft.ifftshift(x_fft * masks_low, dim=(-2, -1))).real
+    x_high = torch.fft.ifft2(torch.fft.ifftshift(x_fft * masks_high, dim=(-2, -1))).real
     return x_low, x_high
 
 
@@ -269,6 +277,9 @@ def hf_blend_from_decomp(x1_low, x1_high, x2_high, lam):
     """Compose HF-mixed image from pre-computed decompositions.
 
     x_mix = x1_low + lam * x1_high + (1-lam) * x2_high
+
+    Clamps output to the input value range to avoid FFT ringing artefacts
+    pushing values outside the valid image domain.
 
     Args:
         x1_low:  [N, C, H, W] — low-freq of anchor
@@ -281,7 +292,11 @@ def hf_blend_from_decomp(x1_low, x1_high, x2_high, lam):
     """
     if not isinstance(lam, (int, float)):
         lam = lam.view(-1, 1, 1, 1)
-    return x1_low + lam * x1_high + (1.0 - lam) * x2_high
+    mixed = x1_low + lam * x1_high + (1.0 - lam) * x2_high
+    # Clamp to input range — FFT ringing can push values outside valid domain
+    vmin = (x1_low + x1_high).amin(dim=(-3, -2, -1), keepdim=True)
+    vmax = (x1_low + x1_high).amax(dim=(-3, -2, -1), keepdim=True)
+    return torch.clamp(mixed, min=vmin, max=vmax)
 
 # ─────────────────────────────────────────────────────────────────────────────
 
