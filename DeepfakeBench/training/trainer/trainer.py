@@ -39,16 +39,25 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ── Asymmetric Mixup ──────────────────────────────────────────────────────────
-def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0):
+def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None):
     """
     Asymmetric Mixup: Real-Real / Fake-Fake → standard mixup label;
     Real-Fake → y_mixed = 1 - (real_prop ** gamma)  (aggressively Fake).
     y=0 → Real, y=1 → Fake.
-    Returns mixed images and soft labels in [0, 1].
+
+    When hf_cutoff is not None, image blending uses FFT-based HF-only mixing
+    instead of pixel-space blending.  Labels are unchanged.
     """
     lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
     index = torch.randperm(x.size(0), device=x.device)
-    mixed_x = lam * x + (1 - lam) * x[index]
+
+    if hf_cutoff is not None:
+        x_low, x_high = decompose_fft(x, hf_cutoff)
+        lam_t = torch.tensor(lam, dtype=torch.float32, device=x.device)
+        mixed_x = hf_blend_from_decomp(x_low, x_high, x_high[index], lam_t)
+    else:
+        mixed_x = lam * x + (1 - lam) * x[index]
+
     y_a, y_b = y.float(), y[index].float()
     lam_t = torch.tensor(lam, dtype=torch.float32, device=x.device)
     # proportion of the Fake image in the blend
@@ -59,11 +68,12 @@ def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0):
     return mixed_x, mixed_y
 
 
-def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardest'):
+def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardest',
+                     hf_cutoff=None):
     """
-    Built on top of asymmetric_mixup's randperm structure.
-    K-candidate replaces only real+fake (y_a=0, y_b=1) pairs.
-    real+real / fake+fake / fake+real pairs use shared-λ randperm (same as asymmetric_mixup).
+    K-candidate asymmetric mixup.  When hf_cutoff is not None, only the
+    real+fake K-candidate path uses FFT-based HF-only blending; rr/ff/fr
+    pairs continue with pixel-space mixing.  Labels: asymmetric soft.
     """
     x, y = data_dict['image'], data_dict['label']
     real_idx = (y == 0).nonzero(as_tuple=True)[0]   # [R]
@@ -72,8 +82,12 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
     R, F_orig = len(real_idx), len(fake_idx)
 
     if K <= 1 or R == 0 or F_orig == 0:
-        mixed_x, label_soft = asymmetric_mixup(x, y, alpha, gamma)
+        mixed_x, label_soft = asymmetric_mixup(x, y, alpha, gamma, hf_cutoff=hf_cutoff)
         return {**data_dict, 'image': mixed_x, 'label_soft': label_soft}
+
+    # Pre-compute FFT decomposition once (only needed for rf K-candidate path)
+    x_low, x_high = (decompose_fft(x, hf_cutoff) if hf_cutoff is not None
+                     else (None, None))
 
     # ── 1. Randperm base (shared λ, same structure as asymmetric_mixup) ────
     lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
@@ -145,9 +159,24 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
                   .expand(K_eff, -1, -1, -1, -1)
                   .reshape(K_eff * n_rf, *x.shape[1:]))
     x_fake_rep = x[cand_fake.reshape(-1)]
-    lam_exp = lam_t_kr.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, *x.shape[1:])
-    lam_exp = lam_exp.reshape(K_eff * n_rf, *x.shape[1:])
-    mixed_kr = lam_exp * x_real_rep + (1.0 - lam_exp) * x_fake_rep
+
+    if hf_cutoff is not None:
+        # HF-only blending for rf pairs: real low + λ·real high + (1-λ)·fake high
+        real_low_rep = (x_low[rf_idx]
+                        .unsqueeze(0).expand(K_eff, -1, -1, -1, -1)
+                        .reshape(K_eff * n_rf, *x.shape[1:]))
+        real_high_rep = (x_high[rf_idx]
+                         .unsqueeze(0).expand(K_eff, -1, -1, -1, -1)
+                         .reshape(K_eff * n_rf, *x.shape[1:]))
+        fake_high_rep = x_high[cand_fake.reshape(-1)]
+        lam_1d = lam_t_kr.reshape(-1)  # [K_eff * n_rf]
+        mixed_kr = hf_blend_from_decomp(real_low_rep, real_high_rep,
+                                        fake_high_rep, lam_1d)
+    else:
+        lam_exp = lam_t_kr.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, *x.shape[1:])
+        lam_exp = lam_exp.reshape(K_eff * n_rf, *x.shape[1:])
+        mixed_kr = lam_exp * x_real_rep + (1.0 - lam_exp) * x_fake_rep
+
     soft_val_exp = soft_val_kr.reshape(-1)                                 # [K_eff * n_rf]
 
     if selection == 'mean':
@@ -192,6 +221,83 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
 
     return {**data_dict, 'image': new_x, 'label': new_label,
             'label_soft': new_label_soft}
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── HF-Mixup: FFT-based high-frequency-only blending ─────────────────────────
+
+_FREQ_MASK_CACHE = {}
+
+def _get_freq_masks(h, w, cutoff, device):
+    """Cached circular low/high-pass masks (post-fftshift coordinates).
+
+    Low frequencies are at the center of the spectrum after fftshift.
+    Returns (mask_low, mask_high) as [H, W] on the target device.
+    """
+    key = (h, w, round(cutoff, 5), device.index if device.type == 'cuda' else -1)
+    if key not in _FREQ_MASK_CACHE:
+        # Nyquist-relative radius: r = cutoff * min(H,W) / 2
+        r = cutoff * min(h, w) / 2.0
+        ys = torch.arange(h, device=device).float()
+        xs = torch.arange(w, device=device).float()
+        yv, xv = torch.meshgrid(ys, xs, indexing='ij')
+        # Centre of the *fftshifted* spectrum is at (h/2, w/2)
+        dist = torch.sqrt((yv - h / 2.0) ** 2 + (xv - w / 2.0) ** 2)
+        mask_low = (dist <= r).float()
+        mask_high = 1.0 - mask_low
+        _FREQ_MASK_CACHE[key] = (mask_low, mask_high)
+    return _FREQ_MASK_CACHE[key]
+
+
+def decompose_fft(x, cutoff=0.125):
+    """Decompose images into low-freq and high-freq components via FFT.
+
+    Uses fftshift so the mask centre aligns with the DC component.
+    Restores the original value range via clamp.
+
+    Args:
+        x: [N, C, H, W]
+        cutoff: frequency cutoff fraction (relative to Nyquist radius)
+
+    Returns:
+        x_low:  [N, C, H, W] — low-freq component (semantic structure)
+        x_high: [N, C, H, W] — high-freq component (texture / artifact)
+    """
+    N, C, H, W = x.shape
+    mask_low, mask_high = _get_freq_masks(H, W, cutoff, x.device)
+    masks_low = mask_low.view(1, 1, H, W)
+    masks_high = mask_high.view(1, 1, H, W)
+
+    x_fft = torch.fft.fftshift(torch.fft.fft2(x), dim=(-2, -1))
+    x_low  = torch.fft.ifft2(torch.fft.ifftshift(x_fft * masks_low, dim=(-2, -1))).real
+    x_high = torch.fft.ifft2(torch.fft.ifftshift(x_fft * masks_high, dim=(-2, -1))).real
+    return x_low, x_high
+
+
+def hf_blend_from_decomp(x1_low, x1_high, x2_high, lam):
+    """Compose HF-mixed image from pre-computed decompositions.
+
+    x_mix = x1_low + lam * x1_high + (1-lam) * x2_high
+
+    Clamps output to the input value range to avoid FFT ringing artefacts
+    pushing values outside the valid image domain.
+
+    Args:
+        x1_low:  [N, C, H, W] — low-freq of anchor
+        x1_high: [N, C, H, W] — high-freq of anchor
+        x2_high: [N, C, H, W] — high-freq of partner
+        lam: float or tensor broadcastable to [N, 1, 1, 1]
+
+    Returns:
+        blended [N, C, H, W]
+    """
+    if not isinstance(lam, (int, float)):
+        lam = lam.view(-1, 1, 1, 1)
+    mixed = x1_low + lam * x1_high + (1.0 - lam) * x2_high
+    # Clamp to input range — FFT ringing can push values outside valid domain
+    vmin = (x1_low + x1_high).amin(dim=(-3, -2, -1), keepdim=True)
+    vmax = (x1_low + x1_high).amax(dim=(-3, -2, -1), keepdim=True)
+    return torch.clamp(mixed, min=vmin, max=vmax)
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -418,20 +524,24 @@ class Trainer(object):
                 if data_dict[key]!=None and key!='name':
                     data_dict[key]=data_dict[key].cuda()
 
-            # ── Asymmetric Mixup (training only) ──────────────────────────
+            # ── Mixup (training only) ────────────────────────────────────
             if self.config.get('use_mixup', False):
                 alpha   = self.config.get('mixup_alpha', 1.0)
                 gamma   = self.config.get('mixup_gamma', 5.0)
                 mixup_mode = self.config.get('mixup_mode', 'asymmetric')
+                mix_domain = self.config.get('mix_domain', 'rgb')
+                hf_cutoff = self.config.get('hf_cutoff', 0.125) if mix_domain == 'hf' else None
                 if mixup_mode == 'original':
                     data_dict['image'], data_dict['label_soft'] = asymmetric_mixup(
-                        data_dict['image'], data_dict['label'], alpha=alpha, gamma=gamma,
+                        data_dict['image'], data_dict['label'],
+                        alpha=alpha, gamma=gamma, hf_cutoff=hf_cutoff,
                     )
                 else:
                     mixup_k = self.config.get('mixup_k', 1)
                     data_dict = hardest_k_mixup(
                         self.model, data_dict, K=mixup_k, alpha=alpha, gamma=gamma,
                         selection=self.config.get('mixup_selection', 'hardest'),
+                        hf_cutoff=hf_cutoff,
                     )
             # ──────────────────────────────────────────────────────────────
             losses,predictions=self.train_step(data_dict)
