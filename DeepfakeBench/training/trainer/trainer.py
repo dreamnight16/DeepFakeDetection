@@ -39,7 +39,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ── Asymmetric Mixup ──────────────────────────────────────────────────────────
-def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None):
+def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None, mix_domain='rgb'):
     """
     Asymmetric Mixup: Real-Real / Fake-Fake → standard mixup label;
     Real-Fake → y_mixed = 1 - (real_prop ** gamma)  (aggressively Fake).
@@ -47,14 +47,17 @@ def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None):
 
     When hf_cutoff is not None, image blending uses FFT-based HF-only mixing
     instead of pixel-space blending.  Labels are unchanged.
+
+    mix_domain: 'rgb' | 'hf' | 'ycbcr_hf'
     """
     lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
     index = torch.randperm(x.size(0), device=x.device)
 
     if hf_cutoff is not None:
-        x_low, x_high = decompose_fft(x, hf_cutoff)
+        x_low, x_high = _hf_enter(x, hf_cutoff, mix_domain)
         lam_t = torch.tensor(lam, dtype=torch.float32, device=x.device)
         mixed_x = hf_blend_from_decomp(x_low, x_high, x_high[index], lam_t)
+        mixed_x = _hf_exit(mixed_x, mix_domain)
     else:
         mixed_x = lam * x + (1 - lam) * x[index]
 
@@ -69,11 +72,13 @@ def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None):
 
 
 def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardest',
-                     hf_cutoff=None):
+                     hf_cutoff=None, mix_domain='rgb'):
     """
     K-candidate asymmetric mixup.  When hf_cutoff is not None, only the
     real+fake K-candidate path uses FFT-based HF-only blending; rr/ff/fr
     pairs continue with pixel-space mixing.  Labels: asymmetric soft.
+
+    mix_domain: 'rgb' | 'hf' | 'ycbcr_hf'
     """
     x, y = data_dict['image'], data_dict['label']
     real_idx = (y == 0).nonzero(as_tuple=True)[0]   # [R]
@@ -82,12 +87,15 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
     R, F_orig = len(real_idx), len(fake_idx)
 
     if K <= 1 or R == 0 or F_orig == 0:
-        mixed_x, label_soft = asymmetric_mixup(x, y, alpha, gamma, hf_cutoff=hf_cutoff)
+        mixed_x, label_soft = asymmetric_mixup(
+            x, y, alpha, gamma, hf_cutoff=hf_cutoff, mix_domain=mix_domain)
         return {**data_dict, 'image': mixed_x, 'label_soft': label_soft}
 
     # Pre-compute FFT decomposition once (only needed for rf K-candidate path)
-    x_low, x_high = (decompose_fft(x, hf_cutoff) if hf_cutoff is not None
-                     else (None, None))
+    if hf_cutoff is not None:
+        x_low, x_high = _hf_enter(x, hf_cutoff, mix_domain)
+    else:
+        x_low, x_high = None, None
 
     # ── 1. Randperm base (shared λ, same structure as asymmetric_mixup) ────
     lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
@@ -100,11 +108,11 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
     rf = (y == 0) & (y[index] == 1)   # real+fake → K-candidate
     fr = (y == 1) & (y[index] == 0)   # fake+real → asymmetric
 
-    # ── 2. Real+real (shared λ, randperm partner) ─────────────────────────
+    # ── 2. Real+real (shared λ, randperm partner, always pixel-space) ─────
     rr_x = lam_t * x[rr] + (1.0 - lam_t) * x[index[rr]]
     rr_soft = torch.zeros(rr.sum().item(), device=x.device)
 
-    # ── 3. Fake+fake (shared λ, randperm partner) ─────────────────────────
+    # ── 3. Fake+fake (shared λ, randperm partner, always pixel-space) ─────
     n_ff = ff.sum().item()
     if n_ff > 0:
         ff_x = lam_t * x[ff] + (1.0 - lam_t) * x[index[ff]]
@@ -172,6 +180,7 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
         lam_1d = lam_t_kr.reshape(-1)  # [K_eff * n_rf]
         mixed_kr = hf_blend_from_decomp(real_low_rep, real_high_rep,
                                         fake_high_rep, lam_1d)
+        mixed_kr = _hf_exit(mixed_kr, mix_domain)  # back to RGB
     else:
         lam_exp = lam_t_kr.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, *x.shape[1:])
         lam_exp = lam_exp.reshape(K_eff * n_rf, *x.shape[1:])
@@ -273,6 +282,20 @@ def decompose_fft(x, cutoff=0.125):
     return x_low, x_high
 
 
+def decompose_fft_channelwise(x, cutoff):
+    """Per-channel FFT decomposition for colour-space-aware modes (e.g. YCbCr).
+
+    Decomposes each channel independently so that luminance/chrominance
+    components are processed with their own frequency statistics.
+    """
+    lows, highs = [], []
+    for c in range(x.size(1)):
+        lo, hi = decompose_fft(x[:, c:c+1], cutoff)
+        lows.append(lo)
+        highs.append(hi)
+    return torch.cat(lows, dim=1), torch.cat(highs, dim=1)
+
+
 def hf_blend_from_decomp(x1_low, x1_high, x2_high, lam):
     """Compose HF-mixed image from pre-computed decompositions.
 
@@ -297,6 +320,56 @@ def hf_blend_from_decomp(x1_low, x1_high, x2_high, lam):
     vmin = (x1_low + x1_high).amin(dim=(-3, -2, -1), keepdim=True)
     vmax = (x1_low + x1_high).amax(dim=(-3, -2, -1), keepdim=True)
     return torch.clamp(mixed, min=vmin, max=vmax)
+
+
+# ── YCbCr colour-space conversion ────────────────────────────────────────────
+
+def rgb_to_ycbcr(x):
+    """Convert RGB images to YCbCr (BT.601).  x: [N, C, H, W] in RGB order."""
+    mat = x.new_tensor([
+        [0.2990,  0.5870,  0.1140],
+        [-0.1687, -0.3313,  0.5000],
+        [0.5000, -0.4187, -0.0813],
+    ]).t()  # [3, 3]
+    offset = x.new_tensor([0.0, 0.5, 0.5]).view(1, 3, 1, 1)
+    # [N,C,H,W] → [N,C,HW]ᵗ → matmul → [N,C,HW]ᵗ → [N,C,H,W]
+    N, C, H, W = x.shape
+    x_flat = x.permute(0, 2, 3, 1).reshape(-1, 3)  # [N*H*W, 3]
+    ycbcr = x_flat @ mat  # [N*H*W, 3]
+    return ycbcr.reshape(N, H, W, 3).permute(0, 3, 1, 2) + offset
+
+
+def ycbcr_to_rgb(x):
+    """Convert YCbCr images back to RGB (BT.601 inverse).  x: [N, C, H, W]."""
+    mat = x.new_tensor([
+        [1.0,  0.0,     1.4020],
+        [1.0, -0.3441, -0.7141],
+        [1.0,  1.7720,  0.0],
+    ]).t()  # [3, 3]
+    offset = x.new_tensor([0.0, 0.5, 0.5]).view(1, 3, 1, 1)
+    x_centered = x - offset
+    N, C, H, W = x_centered.shape
+    x_flat = x_centered.permute(0, 2, 3, 1).reshape(-1, 3)  # [N*H*W, 3]
+    rgb = x_flat @ mat  # [N*H*W, 3]
+    return rgb.reshape(N, H, W, 3).permute(0, 3, 1, 2)
+
+
+def _hf_enter(x, hf_cutoff, mix_domain):
+    """Enter HF domain: optionally convert colour space, then per-channel FFT.
+
+    Returns (x_low, x_high) — both in the target colour space.
+    """
+    if mix_domain == 'ycbcr_hf':
+        x = rgb_to_ycbcr(x)
+    return decompose_fft_channelwise(x, hf_cutoff)
+
+
+def _hf_exit(mixed_x, mix_domain):
+    """Exit HF domain: optionally convert back to RGB, clamp to [0,1]."""
+    if mix_domain == 'ycbcr_hf':
+        mixed_x = ycbcr_to_rgb(mixed_x)
+        mixed_x = torch.clamp(mixed_x, 0, 1)
+    return mixed_x
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -530,11 +603,13 @@ class Trainer(object):
                 gamma   = self.config.get('mixup_gamma', 5.0)
                 mixup_mode = self.config.get('mixup_mode', 'asymmetric')
                 mix_domain = self.config.get('mix_domain', 'rgb')
-                hf_cutoff = self.config.get('hf_cutoff', 0.125) if mix_domain == 'hf' else None
+                hf_cutoff = self.config.get('hf_cutoff', 0.125) if mix_domain in ('hf', 'ycbcr_hf') else None
+
                 if mixup_mode == 'original':
                     data_dict['image'], data_dict['label_soft'] = asymmetric_mixup(
                         data_dict['image'], data_dict['label'],
                         alpha=alpha, gamma=gamma, hf_cutoff=hf_cutoff,
+                        mix_domain=mix_domain,
                     )
                 else:
                     mixup_k = self.config.get('mixup_k', 1)
@@ -542,6 +617,7 @@ class Trainer(object):
                         self.model, data_dict, K=mixup_k, alpha=alpha, gamma=gamma,
                         selection=self.config.get('mixup_selection', 'hardest'),
                         hf_cutoff=hf_cutoff,
+                        mix_domain=mix_domain,
                     )
             # ──────────────────────────────────────────────────────────────
             losses,predictions=self.train_step(data_dict)
