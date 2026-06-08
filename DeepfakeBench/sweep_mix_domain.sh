@@ -16,8 +16,8 @@ NGPU=${1:-1}
 
 > "$SWEEP_LOG"
 
-MODES=("rgb" "hf" "ycbcr_hf")
-GAMMAS=(3.0)
+MODES=("hf" "lf" "ycbcr_hf" "ycbcr_lf")
+GAMMAS=(5.0)
 ALPHAS=(10.0)
 
 run_one() {
@@ -76,8 +76,8 @@ run_one() {
     rm -f "$TMP_YAML"
 }
 
-# ====== Coarse sweep per mode (4 gamma x 4 alpha = 16 per mode) ======
-PER_MODE=16
+# ====== Fixed-param comparison: hf vs lf (RGB + YCbCr) ======
+PER_MODE=1
 TOTAL=$(( ${#MODES[@]} * PER_MODE ))
 run_idx=0
 
