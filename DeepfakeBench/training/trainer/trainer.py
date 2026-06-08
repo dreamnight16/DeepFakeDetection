@@ -368,7 +368,6 @@ def _hf_exit(mixed_x, mix_domain):
     """Exit HF domain: optionally convert back to RGB, clamp to [0,1]."""
     if mix_domain == 'ycbcr_hf':
         mixed_x = ycbcr_to_rgb(mixed_x)
-        mixed_x = torch.clamp(mixed_x, 0, 1)
     return mixed_x
 
 # ─────────────────────────────────────────────────────────────────────────────
