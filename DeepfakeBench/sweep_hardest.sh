@@ -28,19 +28,20 @@ run_one() {
     sed -i "s/^mixup_gamma:.*/mixup_gamma: ${G}/"           "$TMP_YAML"
     sed -i "s/^mixup_alpha:.*/mixup_alpha: ${A}/"           "$TMP_YAML"
 
+    TRAIN_LOG="train_$(echo "$TAG" | tr '/ ' '_-').log"
     if [ "$NGPU" -gt 1 ]; then
         torchrun --nproc_per_node=$NGPU ./training/train.py \
             --ddp \
             --detector_path "$TMP_YAML" \
             --train_dataset "$TRAIN_DS" \
             --test_dataset "$VAL_DS" \
-            > /dev/null 2>&1 || { echo "$TAG | TRAIN_ERROR" | tee -a "$SWEEP_LOG"; rm -f "$TMP_YAML"; return; }
+            2>&1 | tee "$TRAIN_LOG" || { echo "$TAG | TRAIN_ERROR" | tee -a "$SWEEP_LOG"; rm -f "$TMP_YAML"; return; }
     else
         python3 ./training/train.py \
             --detector_path "$TMP_YAML" \
             --train_dataset "$TRAIN_DS" \
             --test_dataset "$VAL_DS" \
-            > /dev/null 2>&1 || { echo "$TAG | TRAIN_ERROR" | tee -a "$SWEEP_LOG"; rm -f "$TMP_YAML"; return; }
+            2>&1 | tee "$TRAIN_LOG" || { echo "$TAG | TRAIN_ERROR" | tee -a "$SWEEP_LOG"; rm -f "$TMP_YAML"; return; }
     fi
 
     CKPT=$(ls -td "${LOG_DIR}"/effort_*/test/avg/ckpt_best.pth 2>/dev/null | head -1)
@@ -55,9 +56,9 @@ run_one() {
         --weights_path "$CKPT" \
         --test_datasets $TEST_DS 2>/dev/null)
 
-    V_AUC=$(echo "$OUT" | awk '/^video_auc:/{print $2; exit}')
-    AUC=$(echo "$OUT"   | awk '/^auc:/{print $2; exit}')
-    ACC=$(echo "$OUT"   | awk '/^acc:/{print $2; exit}')
+    V_AUC=$(echo "$OUT" | awk '/^video_auc:/{v=$2} END{print v}')
+    AUC=$(echo "$OUT"   | awk '/^auc:/{v=$2} END{print v}')
+    ACC=$(echo "$OUT"   | awk '/^acc:/{v=$2} END{print v}')
 
     echo "$TAG | video_auc=${V_AUC:-NA} | auc=${AUC:-NA} acc=${ACC:-NA}" | tee -a "$SWEEP_LOG"
     rm -f "$TMP_YAML"

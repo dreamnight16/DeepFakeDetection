@@ -90,7 +90,7 @@ save_avg: true
 
 use_loralib: true
 
-multi_crop: true       # 是否开启多crop（默认false）
+multi_crop: false       # 是否开启多crop（默认false）
 crop_radio: 0.8        # 随机crop比例（默认0.8）
 num_crops: 5           # 随机crop数量（默认5）
 use_texture_crop: false # 切换到纹理选patch模式
@@ -110,14 +110,14 @@ margin_weight: 0.5
 optimizer_wrapper: null   # null | sam | pcgrad
 sam_rho: 0.05
 
-use_adaptive_threshold: true  # OWTTT dynamic threshold, set false to disable
+use_adaptive_threshold: false  # OWTTT dynamic threshold, set false to disable
 
 # Asymmetric Mixup
 use_mixup: true       # set true to enable, or pass --mixup_gamma on CLI
 mixup_mode: asymmetric  # 'original' = direct asymmetric_mixup, 'asymmetric' = K-candidate selection
 mix_domain: rgb       # 'rgb' = pixel-space blending, 'hf' = FFT HF blending, 'ycbcr_hf' = YCbCr→FFT HF blending
 hf_cutoff: 0.125      # freq cutoff fraction (only used when mix_domain='hf'), r ≈ 28 for 224×224
-mixup_gamma: 0.5      # Asymmetry intensity: γ=1 → standard Mixup labels
+mixup_gamma: 3.0      # Asymmetry intensity: γ=1 → standard Mixup labels
 mixup_k: 3            # K for multi-candidate mixup (only used when mixup_mode='asymmetric')
 mixup_alpha: 10.0      # Beta(alpha, alpha) — λ concentrates near 0.5
 mixup_selection: hardest  # 'hardest' or 'random' — ablation experiment (only used when mixup_mode='asymmetric')
