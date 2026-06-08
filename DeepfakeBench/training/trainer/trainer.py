@@ -58,7 +58,7 @@ def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None,
     if hf_cutoff is not None:
         if ycbcr:
             x_for_decomp = rgb_to_ycbcr(x)
-            x_low, x_high = decompose_fft_channelwise(x_for_decomp, hf_cutoff)
+            x_low, x_high = decompose_fft(x_for_decomp, hf_cutoff)
         else:
             x_low, x_high = decompose_fft(x, hf_cutoff)
         lam_t = torch.tensor(lam, dtype=torch.float32, device=x.device)
@@ -109,7 +109,7 @@ def hardest_k_mixup(model, data_dict, K, alpha=1.0, gamma=5.0, selection='hardes
     if hf_cutoff is not None:
         if ycbcr:
             x_for_decomp = rgb_to_ycbcr(x)
-            x_low, x_high = decompose_fft_channelwise(x_for_decomp, hf_cutoff)
+            x_low, x_high = decompose_fft(x_for_decomp, hf_cutoff)
         else:
             x_low, x_high = decompose_fft(x, hf_cutoff)
     else:
@@ -319,20 +319,6 @@ def decompose_fft(x, cutoff=0.125):
     return x_low, x_high
 
 
-def decompose_fft_channelwise(x, cutoff):
-    """Per-channel FFT decomposition for colour-space-aware modes (e.g. YCbCr).
-
-    Decomposes each channel independently so that luminance/chrominance
-    components are processed with their own frequency statistics.
-    """
-    lows, highs = [], []
-    for c in range(x.size(1)):
-        lo, hi = decompose_fft(x[:, c:c+1], cutoff)
-        lows.append(lo)
-        highs.append(hi)
-    return torch.cat(lows, dim=1), torch.cat(highs, dim=1)
-
-
 def hf_blend_from_decomp(x1_low, x1_high, x2_high, lam):
     """Compose HF-mixed image from pre-computed decompositions.
 
@@ -389,50 +375,33 @@ def lf_blend_from_decomp(x1_low, x1_high, x2_low, lam):
 # ── YCbCr colour-space conversion ────────────────────────────────────────────
 
 def rgb_to_ycbcr(x):
-    """Convert RGB images to YCbCr (BT.601).  x: [N, C, H, W] in RGB order."""
+    """Convert RGB images to YCbCr (BT.601, no integer offset).
+
+    Works correctly for any input range (e.g. [0,1] or ImageNet-normalized).
+    Y in same range as input; Cb/Cr centred at 0.
+    x: [N, C, H, W] in RGB order.
+    """
     mat = x.new_tensor([
         [0.2990,  0.5870,  0.1140],
         [-0.1687, -0.3313,  0.5000],
         [0.5000, -0.4187, -0.0813],
-    ]).t()  # [3, 3]
-    offset = x.new_tensor([0.0, 0.5, 0.5]).view(1, 3, 1, 1)
-    # [N,C,H,W] → [N,C,HW]ᵗ → matmul → [N,C,HW]ᵗ → [N,C,H,W]
+    ]).t()
     N, C, H, W = x.shape
-    x_flat = x.permute(0, 2, 3, 1).reshape(-1, 3)  # [N*H*W, 3]
-    ycbcr = x_flat @ mat  # [N*H*W, 3]
-    return ycbcr.reshape(N, H, W, 3).permute(0, 3, 1, 2) + offset
+    return (x.permute(0, 2, 3, 1).reshape(-1, 3) @ mat).reshape(N, H, W, 3).permute(0, 3, 1, 2)
 
 
 def ycbcr_to_rgb(x):
-    """Convert YCbCr images back to RGB (BT.601 inverse).  x: [N, C, H, W]."""
+    """Convert YCbCr back to RGB (BT.601 inverse, no integer offset).
+
+    x: [N, C, H, W] in YCbCr order (Cb/Cr centred at 0).
+    """
     mat = x.new_tensor([
         [1.0,  0.0,     1.4020],
         [1.0, -0.3441, -0.7141],
         [1.0,  1.7720,  0.0],
-    ]).t()  # [3, 3]
-    offset = x.new_tensor([0.0, 0.5, 0.5]).view(1, 3, 1, 1)
-    x_centered = x - offset
-    N, C, H, W = x_centered.shape
-    x_flat = x_centered.permute(0, 2, 3, 1).reshape(-1, 3)  # [N*H*W, 3]
-    rgb = x_flat @ mat  # [N*H*W, 3]
-    return rgb.reshape(N, H, W, 3).permute(0, 3, 1, 2)
-
-
-def _hf_enter(x, hf_cutoff, mix_domain):
-    """Enter HF domain: optionally convert colour space, then per-channel FFT.
-
-    Returns (x_low, x_high) — both in the target colour space.
-    """
-    if mix_domain == 'ycbcr_hf':
-        x = rgb_to_ycbcr(x)
-    return decompose_fft_channelwise(x, hf_cutoff)
-
-
-def _hf_exit(mixed_x, mix_domain):
-    """Exit HF domain: optionally convert back to RGB, clamp to [0,1]."""
-    if mix_domain == 'ycbcr_hf':
-        mixed_x = ycbcr_to_rgb(mixed_x)
-    return mixed_x
+    ]).t()
+    N, C, H, W = x.shape
+    return (x.permute(0, 2, 3, 1).reshape(-1, 3) @ mat).reshape(N, H, W, 3).permute(0, 3, 1, 2)
 
 # ─────────────────────────────────────────────────────────────────────────────
 
