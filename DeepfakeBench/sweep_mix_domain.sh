@@ -1,6 +1,6 @@
 #!/bin/bash
-# Mix Domain sweep: coarse grid (gamma x alpha) for each mix_domain mode
-# K=3 fixed, then compare best result per mode
+# Mix Domain: staged comparison + gamma ablation
+# K=3, α=10 fixed
 # Usage:
 #   bash sweep_mix_domain.sh              # single GPU
 #   bash sweep_mix_domain.sh 4            # 4 GPUs via DDP (torchrun)
@@ -16,24 +16,25 @@ NGPU=${1:-1}
 
 > "$SWEEP_LOG"
 
-MODES=("hf" "lf" "ycbcr_hf" "ycbcr_lf")
-GAMMAS=(5.0)
-ALPHAS=(10.0)
-
 run_one() {
-    local MODE=$1 G=$2 A=$3 TAG=$4
+    local TAG=$1 MODE=$2 G=$3 A=$4
     local TRAIN_LOG="sweep_domain_train_${MODE}_g${G}_a${A}.log"
     echo "===== $TAG ====="
 
     TMP_YAML=$(mktemp /tmp/effort_domain_XXXXXX.yaml)
     cp "$YAML" "$TMP_YAML"
-    sed -i "s/^use_mixup:.*/use_mixup: true/"               "$TMP_YAML"
-    sed -i "s/^mixup_mode:.*/mixup_mode: asymmetric/"       "$TMP_YAML"
-    sed -i "s/^mixup_selection:.*/mixup_selection: hardest/" "$TMP_YAML"
-    sed -i "s/^mix_domain:.*/mix_domain: ${MODE}/"          "$TMP_YAML"
-    sed -i "s/^mixup_k:.*/mixup_k: 3/"                      "$TMP_YAML"
-    sed -i "s/^mixup_gamma:.*/mixup_gamma: ${G}/"           "$TMP_YAML"
-    sed -i "s/^mixup_alpha:.*/mixup_alpha: ${A}/"            "$TMP_YAML"
+
+    if [ "$MODE" = "no-mixup" ]; then
+        sed -i "s/^use_mixup:.*/use_mixup: false/" "$TMP_YAML"
+    else
+        sed -i "s/^use_mixup:.*/use_mixup: true/"               "$TMP_YAML"
+        sed -i "s/^mixup_mode:.*/mixup_mode: asymmetric/"       "$TMP_YAML"
+        sed -i "s/^mixup_selection:.*/mixup_selection: hardest/" "$TMP_YAML"
+        sed -i "s/^mix_domain:.*/mix_domain: ${MODE}/"          "$TMP_YAML"
+        sed -i "s/^mixup_k:.*/mixup_k: 3/"                      "$TMP_YAML"
+        sed -i "s/^mixup_gamma:.*/mixup_gamma: ${G}/"           "$TMP_YAML"
+        sed -i "s/^mixup_alpha:.*/mixup_alpha: ${A}/"            "$TMP_YAML"
+    fi
 
     if [ "$NGPU" -gt 1 ]; then
         sed -i "s/^train_batchSize:.*/train_batchSize: $((32 * NGPU))/" "$TMP_YAML"
@@ -76,29 +77,50 @@ run_one() {
     rm -f "$TMP_YAML"
 }
 
-# ====== Fixed-param comparison: hf vs lf (RGB + YCbCr) ======
-PER_MODE=1
-TOTAL=$(( ${#MODES[@]} * PER_MODE ))
 run_idx=0
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage 1 — no-mixup baseline
+# ═══════════════════════════════════════════════════════════════════════════════
+run_idx=$((run_idx + 1))
+run_one "[$run_idx/10] no-mixup baseline" "no-mixup" 0 0
+echo "" | tee -a "$SWEEP_LOG"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage 2 — Mode comparison  (γ=3, α=10, K=3)
+# ═══════════════════════════════════════════════════════════════════════════════
+MODES=("rgb" "hf" "lf" "ycbcr_hf" "ycbcr_lf")
+GAMMA=3.0
+ALPHA=10.0
+
 for MODE in "${MODES[@]}"; do
-    echo "=== Mode: $MODE  (coarse sweep, K=3) ===" | tee -a "$SWEEP_LOG"
-    for G in "${GAMMAS[@]}"; do
-        for A in "${ALPHAS[@]}"; do
-            run_idx=$((run_idx + 1))
-            run_one "$MODE" "$G" "$A" "[$run_idx/$TOTAL] mode=$MODE gamma=$G alpha=$A"
-        done
+    run_idx=$((run_idx + 1))
+    run_one "[$run_idx/10] mode=$MODE gamma=$GAMMA alpha=$ALPHA" "$MODE" "$GAMMA" "$ALPHA"
+done
+echo "" | tee -a "$SWEEP_LOG"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage 3 — Gamma ablation on hf & lf  (γ ∈ {1, 5})
+# ═══════════════════════════════════════════════════════════════════════════════
+for MODE in "hf" "lf"; do
+    for GAMMA in 1.0 5.0; do
+        run_idx=$((run_idx + 1))
+        run_one "[$run_idx/10] mode=$MODE gamma=$GAMMA alpha=$ALPHA (γ-ablation)" "$MODE" "$GAMMA" "$ALPHA"
     done
-    echo "" | tee -a "$SWEEP_LOG"
 done
 
-# ====== Final: best per mode by video_auc ======
+# ═══════════════════════════════════════════════════════════════════════════════
+# Summary
+# ═══════════════════════════════════════════════════════════════════════════════
 echo "" | tee -a "$SWEEP_LOG"
-echo "=== Final: Best per mode by video_auc ===" | tee -a "$SWEEP_LOG"
-echo "  mode       | gamma | alpha | video_auc | auc       | acc" | tee -a "$SWEEP_LOG"
-echo "  -----------|-------|-------|-----------|-----------|-----" | tee -a "$SWEEP_LOG"
+echo "============================================================" | tee -a "$SWEEP_LOG"
+echo "  Summary" | tee -a "$SWEEP_LOG"
+echo "============================================================" | tee -a "$SWEEP_LOG"
+printf "  %-12s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+    "mode" "gamma" "alpha" "video_auc" "auc" "acc" | tee -a "$SWEEP_LOG"
+echo "  -------------|-------|-------|-----------|-----------|------" | tee -a "$SWEEP_LOG"
 
-for MODE in "${MODES[@]}"; do
+for MODE in "no-mixup" "${MODES[@]}"; do
     BEST_LINE=$(grep "mode=$MODE " "$SWEEP_LOG" | grep 'video_auc=' | while read l; do
         v=$(echo "$l" | sed 's/.*video_auc=\([0-9.]*\).*/\1/')
         printf '%s\t%s\n' "$v" "$l"
@@ -110,7 +132,7 @@ for MODE in "${MODES[@]}"; do
         B_V=$(echo "$BEST_LINE"   | sed 's/.*video_auc=\([0-9.]*\).*/\1/')
         B_AUC=$(echo "$BEST_LINE" | sed 's/.*auc=\([0-9.]*\).*/\1/')
         B_ACC=$(echo "$BEST_LINE" | sed 's/.*acc=\([0-9.]*\).*/\1/')
-        printf "  %-10s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+        printf "  %-12s | %-5s | %-5s | %-9s | %-9s | %s\n" \
             "$MODE" "$B_G" "$B_A" "${B_V:-NA}" "${B_AUC:-NA}" "${B_ACC:-NA}" | tee -a "$SWEEP_LOG"
     else
         echo "  $MODE  | no valid result" | tee -a "$SWEEP_LOG"
