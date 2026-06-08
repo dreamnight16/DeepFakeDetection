@@ -87,26 +87,31 @@ run_one "[$run_idx/10] no-mixup baseline" "no-mixup" 0 0
 echo "" | tee -a "$SWEEP_LOG"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Stage 2 — Mode comparison  (γ=3, α=10, K=3)
+# Stage 2 — Mode comparison @ γ=3  (α=10, K=3)
 # ═══════════════════════════════════════════════════════════════════════════════
 MODES=("rgb" "hf" "lf" "ycbcr_hf" "ycbcr_lf")
-GAMMA=3.0
 ALPHA=10.0
 
 for MODE in "${MODES[@]}"; do
     run_idx=$((run_idx + 1))
-    run_one "[$run_idx/10] mode=$MODE gamma=$GAMMA alpha=$ALPHA" "$MODE" "$GAMMA" "$ALPHA"
+    run_one "[$run_idx/15] mode=$MODE gamma=3.0 alpha=$ALPHA" "$MODE" 3.0 "$ALPHA"
+done
+echo "" | tee -a "$SWEEP_LOG"
+
+# Stage 2b — Mode comparison @ γ=5  (advisor request)
+# ═══════════════════════════════════════════════════════════════════════════════
+for MODE in "${MODES[@]}"; do
+    run_idx=$((run_idx + 1))
+    run_one "[$run_idx/15] mode=$MODE gamma=5.0 alpha=$ALPHA (advisor)" "$MODE" 5.0 "$ALPHA"
 done
 echo "" | tee -a "$SWEEP_LOG"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Stage 3 — Gamma ablation on hf & lf  (γ ∈ {1, 5})
+# Stage 3 — Gamma ablation on hf & lf  (γ=1)
 # ═══════════════════════════════════════════════════════════════════════════════
 for MODE in "hf" "lf"; do
-    for GAMMA in 1.0 5.0; do
-        run_idx=$((run_idx + 1))
-        run_one "[$run_idx/10] mode=$MODE gamma=$GAMMA alpha=$ALPHA (γ-ablation)" "$MODE" "$GAMMA" "$ALPHA"
-    done
+    run_idx=$((run_idx + 1))
+    run_one "[$run_idx/15] mode=$MODE gamma=1.0 alpha=$ALPHA (γ-ablation)" "$MODE" 1.0 "$ALPHA"
 done
 
 # ═══════════════════════════════════════════════════════════════════════════════
