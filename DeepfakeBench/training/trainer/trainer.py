@@ -403,6 +403,218 @@ def ycbcr_to_rgb(x):
     N, C, H, W = x.shape
     return (x.permute(0, 2, 3, 1).reshape(-1, 3) @ mat).reshape(N, H, W, 3).permute(0, 3, 1, 2)
 
+# ── Laplacian Pyramid helpers ─────────────────────────────────────────────────
+
+_PYR_KERNEL_CACHE = {}
+
+def _get_pyr_kernel(channels, device):
+    """Cached 5-tap binomial kernel [1,4,6,4,1]/16 (Burt & Adelson 1983)."""
+    key = (channels, device.index if device.type == 'cuda' else -1)
+    if key not in _PYR_KERNEL_CACHE:
+        k = torch.tensor([1., 4., 6., 4., 1.], device=device) / 16.0
+        _PYR_KERNEL_CACHE[key] = k
+    return _PYR_KERNEL_CACHE[key]
+
+
+def _pyr_down(x):
+    """Gaussian pyramid reduce: separable binomial blur + downsample ×2."""
+    N, C, H, W = x.shape
+    k = _get_pyr_kernel(C, x.device)
+    x_pad = F.pad(x, (2, 2, 2, 2), mode='reflect')
+    k_h = k.view(1, 1, 1, 5).expand(C, 1, 1, 5)
+    x_blur = F.conv2d(x_pad, k_h, groups=C)
+    k_v = k.view(1, 1, 5, 1).expand(C, 1, 5, 1)
+    x_blur = F.conv2d(x_blur, k_v, groups=C)
+    return x_blur[:, :, ::2, ::2]
+
+
+def _pyr_up(x, target_size):
+    """Gaussian pyramid expand: upsample ×2 with bilinear interpolation."""
+    return F.interpolate(x, size=target_size, mode='bilinear', align_corners=False)
+
+
+def build_gaussian_pyramid(x, num_levels):
+    """Build Gaussian pyramid: G_0 = x, G_{k+1} = pyr_down(G_k)."""
+    pyramid = [x]
+    for _ in range(num_levels):
+        pyramid.append(_pyr_down(pyramid[-1]))
+    return pyramid
+
+
+def build_laplacian_pyramid(gpyr):
+    """Build Laplacian pyramid: L_k = G_k - pyr_up(G_{k+1})."""
+    lap = []
+    for k in range(len(gpyr) - 1):
+        G_k = gpyr[k]
+        G_next_up = _pyr_up(gpyr[k + 1], G_k.shape[-2:])
+        lap.append(G_k - G_next_up)
+    return lap
+
+
+def reconstruct_from_lap(G_K, lap_pyr):
+    """Reconstruct image from coarsest Gaussian + Laplacian residuals (reversed)."""
+    x = G_K
+    for L_k in reversed(lap_pyr):
+        x = _pyr_up(x, L_k.shape[-2:]) + L_k
+    return x
+
+
+# ── Laplacian-pyramid residual mixup ──────────────────────────────────────────
+
+def lap_pyramid_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
+                       omega=None, epsilon=1e-8):
+    """Laplacian-pyramid residual mixup with fake-evidence label.
+
+    Keeps the real image's coarse structure G_K(x_r) and mixes only the
+    Laplacian residual bands L_k.  The soft label depends on how much fake
+    residual energy is actually injected into the mixed image:
+
+        e_f = Σ ω_k q² ‖L_k(x_f)‖² / (Σ ω_k[(1-q)²‖L_k(x_r)‖² + q²‖L_k(x_f)‖²] + ε)
+        ỹ   = 1 − (1 − e_f)^γ
+
+    where q = 1−λ is the fake residual injection strength (λ ∼ Beta(α,α)).
+
+    Pairing:
+      - real+real    → pixel-space mixup,  label = 0
+      - fake+fake    → pixel-space mixup,  label = 1
+      - real+fake    → Laplacian-pyramid mixup, label = 1−(1−e_f)^γ
+      - fake+real    → pixel-space mixup,  label = 1−(1−λ)^γ  (existing asym)
+
+    Args:
+        x:          [N, C, H, W] images
+        y:          [N] labels (0=real, 1=fake)
+        alpha:      Beta(α,α) parameter for mixing strength λ
+        gamma:      asymmetry exponent (γ>1 pushes labels toward fake)
+        num_levels: K = number of Laplacian pyramid levels
+        omega:      importance weights [num_levels]; default = decreasing
+        epsilon:    numerical stability constant
+
+    Returns:
+        mixed_x:     [N, C, H, W]
+        mixed_y:     [N] soft labels ∈ [0, 1]
+        mixed_label: [N] hard labels (anchor class, 0=real 1=fake)
+    """
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+    lam_t = torch.tensor(lam, dtype=torch.float32, device=x.device)
+
+    index = torch.randperm(x.size(0), device=x.device)
+    y_a = y.float()
+    y_b = y[index].float()
+
+    # ── Pair-type masks ───────────────────────────────────────────────────
+    rr_mask = (y_a == 0) & (y_b == 0)   # real+real
+    ff_mask = (y_a == 1) & (y_b == 1)   # fake+fake
+    rf_mask = (y_a == 0) & (y_b == 1)   # real+fake → Laplacian pyramid
+    fr_mask = (y_a == 1) & (y_b == 0)   # fake+real → asymmetric label
+
+    # ── rr: real+real, pixel-space, label = 0 ──────────────────────────────
+    rr_x = lam_t * x[rr_mask] + (1.0 - lam_t) * x[index[rr_mask]]
+    rr_y = torch.zeros(rr_mask.sum().item(), device=x.device)
+
+    # ── ff: fake+fake, pixel-space, label = 1 ──────────────────────────────
+    n_ff = ff_mask.sum().item()
+    if n_ff > 0:
+        ff_x = lam_t * x[ff_mask] + (1.0 - lam_t) * x[index[ff_mask]]
+        ff_y = torch.ones(n_ff, device=x.device)
+    else:
+        ff_x = torch.empty(0, *x.shape[1:], device=x.device)
+        ff_y = torch.empty(0, device=x.device)
+
+    # ── fr: fake+real, pixel-space, asymmetric label ───────────────────────
+    fr_idx = fr_mask.nonzero(as_tuple=True)[0]
+    n_fr = len(fr_idx)
+    if n_fr > 0:
+        fr_x = lam_t * x[fr_idx] + (1.0 - lam_t) * x[index[fr_idx]]
+        fr_y = (1.0 - ((1.0 - lam_t) ** gamma)).expand(n_fr)
+    else:
+        fr_x = torch.empty(0, *x.shape[1:], device=x.device)
+        fr_y = torch.empty(0, device=x.device)
+
+    # ── rf: real+fake, Laplacian pyramid mixup ─────────────────────────────
+    rf_idx = rf_mask.nonzero(as_tuple=True)[0]
+    n_rf = len(rf_idx)
+    if n_rf > 0:
+        x_r = x[rf_idx]               # anchor: real
+        x_f = x[index[rf_idx]]        # partner: fake
+
+        # Gaussian pyramids
+        gpyr_r = build_gaussian_pyramid(x_r, num_levels)
+        gpyr_f = build_gaussian_pyramid(x_f, num_levels)
+
+        # Coarse structure kept from real
+        G_K = gpyr_r[-1]
+
+        # Laplacian pyramids
+        lap_r = build_laplacian_pyramid(gpyr_r)
+        lap_f = build_laplacian_pyramid(gpyr_f)
+
+        # Fake injection strength  q = 1 − λ  (fake proportion in mix)
+        q_val = 1.0 - lam
+
+        # Default importance weights: ω₀ > ω₁ > ω₂ > …  (finer → higher)
+        if omega is None:
+            omega = [float(num_levels - i) for i in range(num_levels)]
+            s = sum(omega)
+            omega = [w / s for w in omega]
+
+        # Mix Laplacian residuals level-by-level and accumulate e_f terms
+        lap_mixed = []
+        num_terms = []
+        den_terms = []
+
+        for k in range(num_levels):
+            L_r = lap_r[k]
+            L_f = lap_f[k]
+
+            # Mixed residual band
+            L_mix = (1.0 - q_val) * L_r + q_val * L_f
+            lap_mixed.append(L_mix)
+
+            # Per-sample residual energies  [n_rf]
+            E_r = (L_r ** 2).reshape(n_rf, -1).sum(dim=1)
+            E_f = (L_f ** 2).reshape(n_rf, -1).sum(dim=1)
+
+            w_k = omega[k]
+            num_terms.append(w_k * (q_val ** 2) * E_f)
+            den_terms.append(w_k * ((1.0 - q_val) ** 2 * E_r + (q_val ** 2) * E_f))
+
+        # Fake evidence  e_f ∈ [0, 1]
+        e_f = sum(num_terms) / (sum(den_terms) + epsilon)      # [n_rf]
+
+        # Reconstruct mixed image from coarse (real) + mixed residuals
+        rf_x = reconstruct_from_lap(G_K, lap_mixed)
+        # Clamp to real anchor's value range (suppress reconstruction artefacts)
+        rf_x = torch.clamp(rf_x,
+                           x_r.amin(dim=(-3, -2, -1), keepdim=True),
+                           x_r.amax(dim=(-3, -2, -1), keepdim=True))
+
+        # Soft label  ỹ = 1 − (1 − e_f)^γ
+        rf_y = 1.0 - (1.0 - e_f) ** gamma
+    else:
+        rf_x = torch.empty(0, *x.shape[1:], device=x.device)
+        rf_y = torch.empty(0, device=x.device)
+
+    # ── Combine all pair types ────────────────────────────────────────────
+    parts_x = [t for t in [rr_x, ff_x, fr_x, rf_x] if t.numel() > 0]
+    parts_y = [t for t in [rr_y, ff_y, fr_y, rf_y] if t.numel() > 0]
+    mixed_x = torch.cat(parts_x, dim=0)
+    mixed_y = torch.cat(parts_y, dim=0)
+
+    # Aligned hard labels (anchor class per mixed sample)
+    label_parts = []
+    n_rr = rr_mask.sum().item()
+    if n_rr > 0:
+        label_parts.append(torch.zeros(n_rr, dtype=y.dtype, device=x.device))
+    if n_ff > 0:
+        label_parts.append(torch.ones(n_ff, dtype=y.dtype, device=x.device))
+    if n_fr > 0:
+        label_parts.append(torch.ones(n_fr, dtype=y.dtype, device=x.device))
+    if n_rf > 0:
+        label_parts.append(torch.zeros(n_rf, dtype=y.dtype, device=x.device))
+    mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
+
+    return mixed_x, mixed_y, mixed_label
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -647,6 +859,13 @@ class Trainer(object):
                         alpha=alpha, gamma=gamma, hf_cutoff=hf_cutoff,
                         ycbcr=use_ycbcr, mix_freq=mix_freq,
                     )
+                elif mixup_mode == 'lap_pyramid':
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        lap_pyramid_mixup(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
                 else:
                     mixup_k = self.config.get('mixup_k', 1)
                     data_dict = hardest_k_mixup(
