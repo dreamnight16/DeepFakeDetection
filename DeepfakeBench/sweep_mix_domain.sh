@@ -1,6 +1,6 @@
 #!/bin/bash
-# Mix Domain: staged comparison + gamma ablation
-# K=3, α=10 fixed
+# Mix Domain + Laplacian Pyramid: staged comparison + gamma ablation
+# γ=5, α=10 fixed
 # Usage:
 #   bash sweep_mix_domain.sh              # single GPU
 #   bash sweep_mix_domain.sh 4            # 4 GPUs via DDP (torchrun)
@@ -26,7 +26,13 @@ run_one() {
 
     if [ "$MODE" = "no-mixup" ]; then
         sed -i "s/^use_mixup:.*/use_mixup: false/" "$TMP_YAML"
+    elif [ "$MODE" = "lap_pyramid" ]; then
+        sed -i "s/^use_mixup:.*/use_mixup: true/"              "$TMP_YAML"
+        sed -i "s/^mixup_mode:.*/mixup_mode: lap_pyramid/"     "$TMP_YAML"
+        sed -i "s/^mixup_gamma:.*/mixup_gamma: ${G}/"          "$TMP_YAML"
+        sed -i "s/^mixup_alpha:.*/mixup_alpha: ${A}/"          "$TMP_YAML"
     else
+        # rgb / hf — FFT-domain asymmetric mixup
         sed -i "s/^use_mixup:.*/use_mixup: true/"               "$TMP_YAML"
         sed -i "s/^mixup_mode:.*/mixup_mode: asymmetric/"       "$TMP_YAML"
         sed -i "s/^mixup_selection:.*/mixup_selection: hardest/" "$TMP_YAML"
@@ -78,41 +84,18 @@ run_one() {
 }
 
 run_idx=0
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Stage 1 — no-mixup baseline
-# ═══════════════════════════════════════════════════════════════════════════════
-run_idx=$((run_idx + 1))
-run_one "[$run_idx/10] no-mixup baseline" "no-mixup" 0 0
-echo "" | tee -a "$SWEEP_LOG"
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Stage 2 — Mode comparison @ γ=3  (α=10, K=3)
-# ═══════════════════════════════════════════════════════════════════════════════
-MODES=("rgb" "hf" "lf" "ycbcr_hf" "ycbcr_lf")
+MODES=("rgb" "hf" "lap_pyramid")
 ALPHA=10.0
+TOTAL=${#MODES[@]}
 
-for MODE in "${MODES[@]}"; do
-    run_idx=$((run_idx + 1))
-    run_one "[$run_idx/15] mode=$MODE gamma=3.0 alpha=$ALPHA" "$MODE" 3.0 "$ALPHA"
-done
-echo "" | tee -a "$SWEEP_LOG"
-
-# Stage 2b — Mode comparison @ γ=5  (advisor request)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Mode comparison @ γ=5, α=10  (rgb / hf / lap_pyramid)
 # ═══════════════════════════════════════════════════════════════════════════════
 for MODE in "${MODES[@]}"; do
     run_idx=$((run_idx + 1))
-    run_one "[$run_idx/15] mode=$MODE gamma=5.0 alpha=$ALPHA (advisor)" "$MODE" 5.0 "$ALPHA"
+    run_one "[$run_idx/$TOTAL] mode=$MODE gamma=5.0 alpha=$ALPHA" "$MODE" 5.0 "$ALPHA"
 done
 echo "" | tee -a "$SWEEP_LOG"
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Stage 3 — Gamma ablation on hf & lf  (γ=1)
-# ═══════════════════════════════════════════════════════════════════════════════
-for MODE in "hf" "lf"; do
-    run_idx=$((run_idx + 1))
-    run_one "[$run_idx/15] mode=$MODE gamma=1.0 alpha=$ALPHA (γ-ablation)" "$MODE" 1.0 "$ALPHA"
-done
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Summary
@@ -121,11 +104,11 @@ echo "" | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
 echo "  Summary" | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
-printf "  %-12s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+printf "  %-14s | %-5s | %-5s | %-9s | %-9s | %s\n" \
     "mode" "gamma" "alpha" "video_auc" "auc" "acc" | tee -a "$SWEEP_LOG"
-echo "  -------------|-------|-------|-----------|-----------|------" | tee -a "$SWEEP_LOG"
+echo "  --------------|-------|-------|-----------|-----------|------" | tee -a "$SWEEP_LOG"
 
-for MODE in "no-mixup" "${MODES[@]}"; do
+for MODE in "${MODES[@]}"; do
     BEST_LINE=$(grep "mode=$MODE " "$SWEEP_LOG" | grep 'video_auc=' | while read l; do
         v=$(echo "$l" | sed 's/.*video_auc=\([0-9.]*\).*/\1/')
         printf '%s\t%s\n' "$v" "$l"
@@ -137,7 +120,7 @@ for MODE in "no-mixup" "${MODES[@]}"; do
         B_V=$(echo "$BEST_LINE"   | sed 's/.*video_auc=\([0-9.]*\).*/\1/')
         B_AUC=$(echo "$BEST_LINE" | sed 's/.*auc=\([0-9.]*\).*/\1/')
         B_ACC=$(echo "$BEST_LINE" | sed 's/.*acc=\([0-9.]*\).*/\1/')
-        printf "  %-12s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+        printf "  %-14s | %-5s | %-5s | %-9s | %-9s | %s\n" \
             "$MODE" "$B_G" "$B_A" "${B_V:-NA}" "${B_AUC:-NA}" "${B_ACC:-NA}" | tee -a "$SWEEP_LOG"
     else
         echo "  $MODE  | no valid result" | tee -a "$SWEEP_LOG"
