@@ -31,6 +31,7 @@ run_one() {
     local NAME="$1"  MODE="$2"     SEL="$3"  DOM="$4"
     local MLOSS="$5" OPTWRAP="$6"
     local TRAIN_LOG="train_${NAME}.log"
+    local EVAL_LOG="eval_${NAME}.log"
 
     echo "===== [$(date '+%H:%M:%S')] ${NAME} ====="
 
@@ -73,11 +74,11 @@ run_one() {
         return
     fi
 
-    echo "  [eval] testing on: $TEST_DATASETS"
+    echo "  [eval] log -> $EVAL_LOG"
     OUT=$(python3 testall.py \
         --detector_path "$TMP_YAML" \
         --weights_path "$CKPT" \
-        --test_datasets $TEST_DATASETS 2>/dev/null)
+        --test_datasets $TEST_DATASETS 2>&1 | tee "$EVAL_LOG")
 
     V_AUC=$(echo "$OUT" | awk '/^video_auc:/{v=$2} END{print v}')
     AUC=$(echo "$OUT"   | awk '/^auc:/{v=$2} END{print v}')
