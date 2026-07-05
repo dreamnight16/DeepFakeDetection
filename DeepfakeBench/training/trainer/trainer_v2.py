@@ -74,6 +74,24 @@ def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None,
     else:
         mixed_x = lam * x + (1 - lam) * x[index]
 
+    # ── Q1: fr 对（假锚、真伴）重新以真图为基 ─────────────────────────
+    # 交换锚/伴使真图始终为锚 → fake prop = 1-λ，与下方标签 1-λ^γ 一致
+    fr_mask = (y == 1) & (y[index] == 0)
+    if fr_mask.any():
+        if hf_cutoff is not None:
+            if mix_freq == 'lf':
+                fr_x = lf_blend_from_decomp(x_low[index], x_high[index], x_low, lam_t)
+            else:
+                fr_x = hf_blend_from_decomp(x_low[index], x_high[index], x_high, lam_t)
+            if ycbcr:
+                fr_x = ycbcr_to_rgb(fr_x)
+                fr_x = torch.clamp(fr_x,
+                                   x[index].amin(dim=(-3, -2, -1), keepdim=True),
+                                   x[index].amax(dim=(-3, -2, -1), keepdim=True))
+        else:
+            fr_x = lam * x[index] + (1 - lam) * x
+        mixed_x = torch.where(fr_mask.view(-1, 1, 1, 1), fr_x, mixed_x)
+
     # ── 标签计算与 mix_freq 无关（Q1: 统一以真图为基，跨类别 fake_prop=1-λ）─
     y_a, y_b = y.float(), y[index].float()
     lam_t = torch.tensor(lam, dtype=torch.float32, device=x.device)
