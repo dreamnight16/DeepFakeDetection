@@ -30,7 +30,7 @@ from optimizor.SAM import SAM
 from optimizor.LinearLR import LinearDecayLR
 from optimizor.pcgrad import PCGrad
 
-from trainer.trainer import Trainer
+from trainer.trainer_v2 import Trainer
 from detectors import DETECTOR
 from dataset import *
 from metrics.utils import parse_metric_for_print
