@@ -1,5 +1,8 @@
 #!/bin/bash
-# Final sweep: mix modes only (rgb / hf / lap_pyramid)
+# Final sweep: all mix modes
+#   asymmetric (hardest_k, K=3):  rgb / hf / lf / ycbcr_hf / ycbcr_lf
+#   lap_pyramid
+#   no-mixup baseline
 # Two param combos: γ=1 α=5  and  γ=5 α=10
 # Usage:
 #   bash sweep_final.sh              # single GPU
@@ -18,13 +21,19 @@ NGPU=${1:-1}
 
 run_one() {
     local TAG=$1 MODE=$2 G=$3 A=$4
-    local TRAIN_LOG="sweep_final_train_${MODE}_g${G}_a${A}.log"
+    if [ "$MODE" = "no-mixup" ]; then
+        local TRAIN_LOG="sweep_final_train_no_mixup.log"
+    else
+        local TRAIN_LOG="sweep_final_train_${MODE}_g${G}_a${A}.log"
+    fi
     echo "===== $TAG ====="
 
     TMP_YAML=$(mktemp /tmp/effort_final_XXXXXX.yaml)
     cp "$YAML" "$TMP_YAML"
 
-    if [ "$MODE" = "lap_pyramid" ]; then
+    if [ "$MODE" = "no-mixup" ]; then
+        sed -i "s/^use_mixup:.*/use_mixup: false/" "$TMP_YAML"
+    elif [ "$MODE" = "lap_pyramid" ]; then
         sed -i "s/^use_mixup:.*/use_mixup: true/"              "$TMP_YAML"
         sed -i "s/^mixup_mode:.*/mixup_mode: lap_pyramid/"     "$TMP_YAML"
         sed -i "s/^mixup_gamma:.*/mixup_gamma: ${G}/"          "$TMP_YAML"
@@ -80,10 +89,12 @@ run_one() {
     rm -f "$TMP_YAML"
 }
 
-MODES=("rgb" "hf" "lap_pyramid")
+# 5 mix_domain modes (asymmetric + hardest, K=3) + lap_pyramid
+MODES=("rgb" "hf" "lf" "ycbcr_hf" "ycbcr_lf" "lap_pyramid")
 COMBOS=("1.0 5.0" "5.0 10.0")
-TOTAL=$(( ${#MODES[@]} * ${#COMBOS[@]} ))
+TOTAL=$(( ${#MODES[@]} * ${#COMBOS[@]} + 1 ))   # +1 for no-mixup baseline
 
+# ── Param sweep ──────────────────────────────────────────────────────────────
 run_idx=0
 for COMBO in "${COMBOS[@]}"; do
     read G A <<< "$COMBO"
@@ -92,6 +103,10 @@ for COMBO in "${COMBOS[@]}"; do
         run_one "[$run_idx/$TOTAL] mode=$MODE gamma=$G alpha=$A" "$MODE" "$G" "$A"
     done
 done
+
+# ── no-mixup baseline ────────────────────────────────────────────────────────
+run_idx=$((run_idx + 1))
+run_one "[$run_idx/$TOTAL] mode=no-mixup" "no-mixup" "0" "0"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Summary
@@ -119,6 +134,18 @@ for COMBO in "${COMBOS[@]}"; do
         fi
     done
 done
+
+# no-mixup row
+NOLINE=$(grep "mode=no-mixup " "$SWEEP_LOG" 2>/dev/null | head -1)
+if [ -n "$NOLINE" ]; then
+    B_V=$(echo "$NOLINE"   | sed 's/.*video_auc=\([0-9.]*\).*/\1/')
+    B_AUC=$(echo "$NOLINE" | sed 's/.*auc=\([0-9.]*\).*/\1/')
+    B_ACC=$(echo "$NOLINE" | sed 's/.*acc=\([0-9.]*\).*/\1/')
+    printf "  %-14s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+        "no-mixup" "—" "—" "${B_V:-NA}" "${B_AUC:-NA}" "${B_ACC:-NA}" | tee -a "$SWEEP_LOG"
+else
+    echo "  no-mixup  | no result" | tee -a "$SWEEP_LOG"
+fi
 
 echo "" | tee -a "$SWEEP_LOG"
 echo "=== All $TOTAL runs done.  Log saved to $SWEEP_LOG ===" | tee -a "$SWEEP_LOG"
