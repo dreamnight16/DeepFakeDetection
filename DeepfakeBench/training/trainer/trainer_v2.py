@@ -74,8 +74,11 @@ def asymmetric_mixup(x, y, alpha=1.0, gamma=5.0, hf_cutoff=None,
     else:
         mixed_x = lam * x + (1 - lam) * x[index]
 
-    # ── Q1: fr 对（假锚、真伴）重新以真图为基 ─────────────────────────
-    # 交换锚/伴使真图始终为锚 → fake prop = 1-λ，与下方标签 1-λ^γ 一致
+    # ── Q1: fr 对重新以真图为基 ─────────────────────────────────────
+    # 交换锚/伴使真图始终为锚 → fake prop = 1-λ，标签统一为 1-λ^γ
+    # 像素空间：λ→1-λ 重参数化，Beta 对称下等价（纯 no-op）
+    # FFT 路径：真图低频+高频为基，假图高频注入——低频分量变更是有意为之
+    #   （deepfake 本质：真结构 + 假纹理，与 HF-Mixup 的锚定逻辑一致）
     fr_mask = (y == 1) & (y[index] == 0)
     if fr_mask.any():
         if hf_cutoff is not None:

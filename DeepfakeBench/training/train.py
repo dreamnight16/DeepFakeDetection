@@ -70,7 +70,34 @@ def prepare_training_data(config):
         config=config,
         mode='train',
     )
-    if config['ddp']:
+    # ── Balanced batch sampler (strict per-class count per batch) ─────────
+    if config.get('use_balance_batch_sampler', False):
+        if config['ddp']:
+            raise NotImplementedError(
+                'BalanceBatchSampler is not yet supported with DDP. '
+                'Set use_balance_batch_sampler=False or disable DDP.'
+            )
+        num_classes = len(set(train_set.label_list))
+        if 'batch_size_per_class' in config:
+            batch_size_per_class = config['batch_size_per_class']
+        else:
+            # Auto-derive from train_batchSize to keep parameters unchanged
+            batch_size_per_class = max(1, config['train_batchSize'] // num_classes)
+        batch_sampler = BalanceBatchSampler(
+            train_set.label_list,
+            batch_size_per_class=batch_size_per_class,
+            shuffle=True,
+        )
+        effective_bs = num_classes * batch_size_per_class
+        print(f'[BalanceBatchSampler] batch_size_per_class={batch_size_per_class}, '
+              f'effective batch_size={effective_bs}')
+        train_data_loader = torch.utils.data.DataLoader(
+            dataset=train_set,
+            batch_sampler=batch_sampler,
+            num_workers=int(config['workers']),
+            collate_fn=train_set.collate_fn,
+        )
+    elif config['ddp']:
         sampler = DistributedSampler(train_set)
         train_data_loader = \
             torch.utils.data.DataLoader(
