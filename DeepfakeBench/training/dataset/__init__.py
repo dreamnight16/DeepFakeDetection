@@ -7,4 +7,4 @@ sys.path.append(parent_dir)
 sys.path.append(project_root_dir)
 from dataset.albu import IsotropicResize
 from dataset.abstract_dataset import DeepfakeAbstractBaseDataset
-from dataset.balance_batch_sampler import BalanceBatchSampler
+from dataset.balance_batch_sampler import BalanceBatchSampler, BalancePairSampler

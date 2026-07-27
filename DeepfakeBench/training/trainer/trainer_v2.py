@@ -618,6 +618,73 @@ def lap_pyramid_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
 
     return mixed_x, mixed_y, mixed_label
 
+
+def rf_pair_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
+                   omega=None, epsilon=1e-8):
+    """RF-only Laplacian pyramid mixup for interleaved batches (v2 sampler).
+
+    Input batch is interleaved: [r1, f1, r2, f2, ..., rN, fN] (2N total).
+    Pairs r_i with f_i directly — no randperm, so only RF pairs are produced.
+
+    Returns:
+        mixed_x:     [N, C, H, W]  (N = pairs_per_batch)
+        mixed_y:     [N] soft labels ∈ [0, 1]
+        mixed_label: [N] hard labels (0 = real anchor)
+    """
+    N = x.size(0) // 2
+    x_r = x[0::2]   # [N, C, H, W]  real anchors
+    x_f = x[1::2]   # [N, C, H, W]  fake partners
+
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+    q_val = 1.0 - lam  # fake residual injection strength
+
+    # Gaussian pyramids
+    gpyr_r = build_gaussian_pyramid(x_r, num_levels)
+    gpyr_f = build_gaussian_pyramid(x_f, num_levels)
+
+    # Coarse structure from real
+    G_K = gpyr_r[-1]
+
+    # Laplacian pyramids
+    lap_r = build_laplacian_pyramid(gpyr_r)
+    lap_f = build_laplacian_pyramid(gpyr_f)
+
+    # Default importance weights: finer levels → higher weight
+    if omega is None:
+        omega = [float(num_levels - i) for i in range(num_levels)]
+        s = sum(omega)
+        omega = [w / s for w in omega]
+
+    lap_mixed = []
+    num_terms = []
+    den_terms = []
+
+    for k in range(num_levels):
+        L_r = lap_r[k]
+        L_f = lap_f[k]
+        L_mix = (1.0 - q_val) * L_r + q_val * L_f
+        lap_mixed.append(L_mix)
+
+        E_r = (L_r ** 2).reshape(N, -1).sum(dim=1)
+        E_f = (L_f ** 2).reshape(N, -1).sum(dim=1)
+        w_k = omega[k]
+        num_terms.append(w_k * (q_val ** 2) * E_f)
+        den_terms.append(w_k * ((1.0 - q_val) ** 2 * E_r + (q_val ** 2) * E_f))
+
+    e_f = sum(num_terms) / (sum(den_terms) + epsilon)
+
+    # Reconstruct from coarse real + mixed residuals
+    rf_x = reconstruct_from_lap(G_K, lap_mixed)
+    rf_x = torch.clamp(rf_x,
+                        x_r.amin(dim=(-3, -2, -1), keepdim=True),
+                        x_r.amax(dim=(-3, -2, -1), keepdim=True))
+
+    rf_y = 1.0 - (1.0 - e_f) ** gamma
+    rf_label = torch.zeros(N, dtype=y.dtype, device=x.device)
+
+    return rf_x, rf_y, rf_label
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -855,8 +922,18 @@ class Trainer(object):
                 ) else None
                 use_ycbcr  = mix_domain in ('ycbcr_hf', 'ycbcr_lf')
                 mix_freq   = 'lf' if mix_domain in ('lf', 'ycbcr_lf') else 'hf'
+                pair_mode  = self.config.get('balance_sampler_v2', False)
 
-                if mixup_mode == 'original':
+                if pair_mode:
+                    # v2: interleaved RF pairs — fixed pairing, no randperm
+                    # Always uses Laplacian pyramid (rf_pair_mixup), ignores mixup_mode
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        rf_pair_mixup(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
+                elif mixup_mode == 'original':
                     data_dict['image'], data_dict['label_soft'] = asymmetric_mixup(
                         data_dict['image'], data_dict['label'],
                         alpha=alpha, gamma=gamma, hf_cutoff=hf_cutoff,

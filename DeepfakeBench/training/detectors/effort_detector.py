@@ -91,16 +91,21 @@ class EffortDetector(nn.Module):
         
         # 根据配置选择使用 loralib 还是自编 LoRA
         LinearClass = lora_lib.Linear if self.use_loralib else lora.Linear
-        
-        self.head = LinearClass(
-            in_features=1024,
-            out_features=2,
-            r=2,
-            lora_alpha=8,
-            lora_dropout=0,
-            merge_weights=False,
-            bias=True
-        )
+
+        full_train_head = config.get('full_train_head', False) if config else False
+        if full_train_head:
+            # 全量训练分类头：普通 Linear，所有参数可训练
+            self.head = nn.Linear(1024, 2, bias=True)
+        else:
+            self.head = LinearClass(
+                in_features=1024,
+                out_features=2,
+                r=2,
+                lora_alpha=8,
+                lora_dropout=0,
+                merge_weights=False,
+                bias=True
+            )
         self.loss_func = nn.CrossEntropyLoss()
         self.prob, self.label = [], []
         self.correct, self.total = 0, 0
@@ -241,26 +246,33 @@ class EffortDetector(nn.Module):
                 loss = torch.cat([rr_losses, rf_losses, fake_losses]).mean()
             else:
                 loss = per_sample.mean()
+
+            # Per-class decomposition from soft labels:
+            # real contribution = (1 - y_soft) · loss, fake contribution = y_soft · loss
+            w_real = (1.0 - y_soft).sum().clamp(min=1)
+            w_fake = y_soft.sum().clamp(min=1)
+            loss_real = (per_sample * (1.0 - y_soft)).sum() / w_real
+            loss_fake = (per_sample * y_soft).sum() / w_fake
         else:
             loss = self.loss_func(pred, label)
+
+            mask_real = label == 0
+            mask_fake = label == 1
+
+            if mask_real.sum() > 0:
+                pred_real = pred[mask_real]
+                label_real = label[mask_real]
+                loss_real = self.loss_func(pred_real, label_real)
+            else:
+                loss_real = torch.tensor(0.0, device=pred.device)
+
+            if mask_fake.sum() > 0:
+                pred_fake = pred[mask_fake]
+                label_fake = label[mask_fake]
+                loss_fake = self.loss_func(pred_fake, label_fake)
+            else:
+                loss_fake = torch.tensor(0.0, device=pred.device)
         # ─────────────────────────────────────────────────────────────────────
-
-        mask_real = label == 0
-        mask_fake = label == 1
-
-        if mask_real.sum() > 0:
-            pred_real = pred[mask_real]
-            label_real = label[mask_real]
-            loss_real = self.loss_func(pred_real, label_real)
-        else:
-            loss_real = torch.tensor(0.0, device=pred.device)
-
-        if mask_fake.sum() > 0:
-            pred_fake = pred[mask_fake]
-            label_fake = label[mask_fake]
-            loss_fake = self.loss_func(pred_fake, label_fake)
-        else:
-            loss_fake = torch.tensor(0.0, device=pred.device)
         
         loss_dict = {
             'overall': loss,

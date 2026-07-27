@@ -70,8 +70,36 @@ def prepare_training_data(config):
         config=config,
         mode='train',
     )
-    # ── Balanced batch sampler (strict per-class count per batch) ─────────
-    if config.get('use_balance_batch_sampler', False):
+    # ── Balanced batch sampler ────────────────────────────────────────────
+    if config.get('balance_sampler_v2', False):
+        # v2: explicit RF interleaved pairs [r1,f1, r2,f2, ..., rN,fN]
+        if config['ddp']:
+            raise NotImplementedError(
+                'BalancePairSampler is not yet supported with DDP. '
+                'Set balance_sampler_v2=False or disable DDP.'
+            )
+        if 'batch_size_per_class' in config:
+            pairs_per_batch = config['batch_size_per_class']
+        else:
+            # Auto-derive: each pair → 1 mixed output, so pairs = train_batchSize
+            # (2×pairs images loaded, pairs outputs after mixup)
+            pairs_per_batch = config['train_batchSize']
+        batch_sampler = BalancePairSampler(
+            train_set.label_list,
+            batch_size_per_class=pairs_per_batch,
+            shuffle=True,
+        )
+        effective_bs = 2 * pairs_per_batch
+        print(f'[BalancePairSampler v2] pairs_per_batch={pairs_per_batch}, '
+              f'loader_size={effective_bs} → train_bs={pairs_per_batch} after RF mixup')
+        train_data_loader = torch.utils.data.DataLoader(
+            dataset=train_set,
+            batch_sampler=batch_sampler,
+            num_workers=int(config['workers']),
+            collate_fn=train_set.collate_fn,
+        )
+    elif config.get('use_balance_batch_sampler', False):
+        # v1: per-class balanced batches with configurable real:fake ratio
         if config['ddp']:
             raise NotImplementedError(
                 'BalanceBatchSampler is not yet supported with DDP. '
@@ -83,14 +111,21 @@ def prepare_training_data(config):
         else:
             # Auto-derive from train_batchSize to keep parameters unchanged
             batch_size_per_class = max(1, config['train_batchSize'] // num_classes)
+        real_ratio = config.get('sampler_real_ratio', 0.5)
         batch_sampler = BalanceBatchSampler(
             train_set.label_list,
             batch_size_per_class=batch_size_per_class,
             shuffle=True,
+            real_ratio=real_ratio,
         )
-        effective_bs = num_classes * batch_size_per_class
-        print(f'[BalanceBatchSampler] batch_size_per_class={batch_size_per_class}, '
-              f'effective batch_size={effective_bs}')
+        effective_bs = batch_sampler.n_real + batch_sampler.n_fake
+        if abs(real_ratio - 0.5) < 1e-6:
+            print(f'[BalanceBatchSampler v1] batch_size_per_class={batch_size_per_class}, '
+                  f'effective batch_size={effective_bs}')
+        else:
+            print(f'[BalanceBatchSampler v1] batch_size_per_class={batch_size_per_class}, '
+                  f'real_ratio={real_ratio}, n_real={batch_sampler.n_real} n_fake={batch_sampler.n_fake}, '
+                  f'effective batch_size={effective_bs}')
         train_data_loader = torch.utils.data.DataLoader(
             dataset=train_set,
             batch_sampler=batch_sampler,

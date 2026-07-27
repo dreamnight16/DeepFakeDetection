@@ -16,7 +16,7 @@ backbone_config:
 # dataset
 all_dataset: [FaceForensics++, FF-F2F, FF-DF, FF-FS, FF-NT, FaceShifter, DeepFakeDetection, Celeb-DF-v1, Celeb-DF-v2, DFDCP, DFDC, DeeperForensics-1.0, UADFV, WDF, FFIW]
 train_dataset: [FaceForensics++]
-test_dataset: [Celeb-DF-v2, FaceShifter, DeeperForensics-1.0]
+test_dataset: [Celeb-DF-v2]
 
 
 compression: c23  # compression-level for videos
@@ -89,6 +89,7 @@ cudnn: true   # whether to use CuDNN for convolution operations
 save_avg: true
 
 use_loralib: true
+full_train_head: true   # true = nn.Linear (all params trainable), false = LoRA head (rank-2 only)
 
 multi_crop: false       # 是否开启多crop（默认false）
 crop_radio: 0.8        # 随机crop比例（默认0.8）
@@ -102,7 +103,7 @@ texture_beta : 0.5
 
 # Asymmetric Center Loss (margin loss)
 # margin_loss_mode: 'off' | 'add' | 'replace'
-margin_loss_mode: off
+margin_loss_mode: 'off'
 margin_m: 0.5    # 针对大多数高质量deepfake（cos_sim>0.875）激活
                  # 若想覆盖更多deepfake，调大到 0.8（cos_sim>0.68即激活）
 margin_weight: 0.5
@@ -114,12 +115,20 @@ use_adaptive_threshold: false  # OWTTT dynamic threshold, set false to disable
 
 # Asymmetric Mixup
 use_mixup: true       # set true to enable, or pass --mixup_gamma on CLI
-mixup_mode: asymmetric  # 'original' | 'asymmetric' | 'lap_pyramid'
+mixup_mode: lap_pyramid  # 'original' | 'asymmetric' | 'lap_pyramid'
 mix_domain: rgb       # 'rgb' | 'hf' | 'lf' | 'ycbcr_hf' | 'ycbcr_lf'
                         # rgb = pixel-space, hf/lf = RGB FFT band, ycbcr_* = YCbCr FFT band
 hf_cutoff: 0.125      # freq cutoff fraction (only used when mix_domain='hf'), r ≈ 28 for 224×224
-mixup_gamma: 3.0      # Asymmetry intensity: γ=1 → standard Mixup labels
+mixup_gamma: 1.0      # Asymmetry intensity: γ=1 → standard Mixup labels
 mixup_k: 3            # K for multi-candidate mixup (only used when mixup_mode='asymmetric')
-mixup_alpha: 10.0      # Beta(alpha, alpha) — λ concentrates near 0.5
+mixup_alpha: 5.0      # Beta(alpha, alpha) — λ concentrates near 0.5
 mixup_selection: hardest  # 'hardest' or 'random' — ablation experiment (only used when mixup_mode='asymmetric')
 lap_num_levels: 3     # K pyramid levels for lap_pyramid mode (default 3)
+
+use_balance_batch_sampler: false  # v2 (balance_sampler_v2) supersedes this
+sampler_real_ratio: 0.5  # real proportion for v1 sampler (0.5=balanced, 0.7=high-real)
+
+# Balance sampler mode: set balance_sampler_v2=true to use interleaved RF pairs
+# (no RR/FF — every batch element is an explicit real+fake pair).
+# When false, uses v1 (per-class balanced → randperm creates RR/FF/RF/FR).
+balance_sampler_v2: true
