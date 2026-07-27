@@ -101,16 +101,29 @@ run_one() {
         return
     fi
 
-    # ── Evaluate ─────────────────────────────────────────────────────────
+    # ── Evaluate ────────────────────────────────────────────────────────
     echo "  [eval] testing on: $TEST_DS"
-    OUT=$(python3 testall.py \
+    EVAL_LOG="${LOG_DIR}/eval_${SAFE_TAG}.log"
+    python3 testall.py \
         --detector_path "$TMP_YAML" \
         --weights_path "$CKPT" \
-        --test_datasets $TEST_DS 2>/dev/null)
+        --test_datasets $TEST_DS \
+        > "$EVAL_LOG" 2>&1
 
-    V_AUC=$(echo "$OUT" | awk '/^video_auc:/{v=$2} END{print v}')
-    AUC=$(echo "$OUT"   | awk '/^auc:/{v=$2} END{print v}')
-    ACC=$(echo "$OUT"   | awk '/^acc:/{v=$2} END{print v}')
+    # Per-dataset breakdown
+    echo "  [eval] per-dataset:" | tee -a "$SWEEP_LOG"
+    awk '/^dataset: /{ds=$0} /^(auc|video_auc|acc):/{printf "    %s  %s\n", ds, $0}' "$EVAL_LOG" | tee -a "$SWEEP_LOG"
+
+    # Show any warnings
+    if grep -q "WARNING" "$EVAL_LOG"; then
+        echo "  [eval] WARNINGS:" | tee -a "$SWEEP_LOG"
+        grep "WARNING" "$EVAL_LOG" | sed 's/^/    /' | tee -a "$SWEEP_LOG"
+    fi
+
+    # Extract avg metrics (last occurrence = average block)
+    V_AUC=$(awk '/^video_auc:/{v=$2} END{print v}' "$EVAL_LOG")
+    AUC=$(awk   '/^auc:/{v=$2} END{print v}' "$EVAL_LOG")
+    ACC=$(awk   '/^acc:/{v=$2} END{print v}' "$EVAL_LOG")
 
     echo "$TAG | video_auc=${V_AUC:-NA} | auc=${AUC:-NA} | acc=${ACC:-NA}" | tee -a "$SWEEP_LOG"
     rm -f "$TMP_YAML"
