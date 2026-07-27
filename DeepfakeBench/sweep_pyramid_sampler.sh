@@ -37,7 +37,7 @@ run_one() {
     local SAMPLER=$2        # "v1" | "v2" | "no-mixup"
     local REAL_RATIO=${3:-0.5}
 
-    local SAFE_TAG=$(echo "$TAG" | sed 's/ /_/g')
+    local SAFE_TAG=$(echo "$TAG" | sed 's/[][ \/]/_/g')
     local TRAIN_LOG="sweep_pyramid_${SAFE_TAG}_train.log"
     echo "===== $TAG ====="
 
