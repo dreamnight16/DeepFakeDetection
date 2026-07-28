@@ -971,6 +971,39 @@ class Trainer(object):
                         selection=self.config.get('mixup_selection', 'hardest'),
                         num_levels=self.config.get('lap_num_levels', 3),
                     )
+                # ── Personal experiments: label & level ablations ─────────
+                elif mixup_mode == 'lap_pyramid_label_1':
+                    from trainer.lap_pyramid_label_variants import lap_pyramid_label_1
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        lap_pyramid_label_1(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
+                elif mixup_mode == 'lap_pyramid_label_0':
+                    from trainer.lap_pyramid_label_variants import lap_pyramid_label_0
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        lap_pyramid_label_0(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
+                elif mixup_mode == 'lap_pyramid_top_only':
+                    from trainer.lap_pyramid_label_variants import lap_pyramid_top_only
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        lap_pyramid_top_only(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
+                elif mixup_mode == 'lap_pyramid_bottom_only':
+                    from trainer.lap_pyramid_label_variants import lap_pyramid_bottom_only
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        lap_pyramid_bottom_only(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
                 # ──────────────────────────────────────────────────────────
                 else:
                     mixup_k = self.config.get('mixup_k', 1)
