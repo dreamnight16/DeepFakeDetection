@@ -946,6 +946,32 @@ class Trainer(object):
                             alpha=alpha, gamma=gamma,
                             num_levels=self.config.get('lap_num_levels', 3),
                         )
+                # ── Personal experiments: lap_pyramid_variants ─────────────
+                elif mixup_mode == 'lap_pyramid_fake_base':
+                    from trainer.lap_pyramid_variants import lap_pyramid_mixup_fake_base
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        lap_pyramid_mixup_fake_base(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
+                elif mixup_mode == 'lap_pyramid_hardest':
+                    from trainer.lap_pyramid_variants import lap_pyramid_hardest_mixup
+                    mixup_k = self.config.get('mixup_k', 3)
+                    data_dict = lap_pyramid_hardest_mixup(
+                        self.model, data_dict, K=mixup_k, alpha=alpha, gamma=gamma,
+                        selection=self.config.get('mixup_selection', 'hardest'),
+                        num_levels=self.config.get('lap_num_levels', 3),
+                    )
+                elif mixup_mode == 'lap_pyramid_fb_hardest':
+                    from trainer.lap_pyramid_variants import lap_pyramid_fake_base_hardest_mixup
+                    mixup_k = self.config.get('mixup_k', 3)
+                    data_dict = lap_pyramid_fake_base_hardest_mixup(
+                        self.model, data_dict, K=mixup_k, alpha=alpha, gamma=gamma,
+                        selection=self.config.get('mixup_selection', 'hardest'),
+                        num_levels=self.config.get('lap_num_levels', 3),
+                    )
+                # ──────────────────────────────────────────────────────────
                 else:
                     mixup_k = self.config.get('mixup_k', 1)
                     data_dict = hardest_k_mixup(
