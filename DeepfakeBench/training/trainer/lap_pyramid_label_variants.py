@@ -152,7 +152,7 @@ def lap_pyramid_label_1(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     if ff_n > 0:
         label_parts.append(torch.ones(ff_n, dtype=y.dtype, device=x.device))
     if n_rf > 0:
-        label_parts.append(torch.zeros(n_rf, dtype=y.dtype, device=x.device))
+        label_parts.append(torch.ones(n_rf, dtype=y.dtype, device=x.device))
     mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
 
     return mixed_x, mixed_y, mixed_label
@@ -343,7 +343,7 @@ def lap_pyramid_top_only(x, y, alpha=1.0, gamma=5.0, num_levels=3,
         rf_x = torch.clamp(rf_x,
                            x_r.amin(dim=(-3, -2, -1), keepdim=True),
                            x_r.amax(dim=(-3, -2, -1), keepdim=True))
-        rf_label = torch.zeros(n_rf, dtype=y.dtype, device=x.device)
+        rf_label = rf_y
     else:
         rf_x = torch.empty(0, *x.shape[1:], device=x.device)
         rf_y = torch.empty(0, device=x.device)
@@ -444,7 +444,7 @@ def lap_pyramid_bottom_only(x, y, alpha=1.0, gamma=5.0, num_levels=3,
         rf_x = torch.clamp(rf_x,
                            x_r.amin(dim=(-3, -2, -1), keepdim=True),
                            x_r.amax(dim=(-3, -2, -1), keepdim=True))
-        rf_label = torch.zeros(n_rf, dtype=y.dtype, device=x.device)
+        rf_label = rf_y
     else:
         rf_x = torch.empty(0, *x.shape[1:], device=x.device)
         rf_y = torch.empty(0, device=x.device)

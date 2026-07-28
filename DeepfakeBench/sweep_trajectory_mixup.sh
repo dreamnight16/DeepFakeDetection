@@ -1,21 +1,30 @@
 #!/bin/bash
 # ===========================================================================
-# Sweep: Laplacian Pyramid Mixup — sampler comparison
-#   1) pyramid + v1 sampler (real_ratio=0.5, baseline)
-#   2) pyramid + v2 sampler (RF-only pairs)
-#   3) pyramid + v1 sampler + high-real-image ratios (0.7, 0.85)
-#   4) no-mixup baseline (v1 sampler)
+# Sweep: Diffusion Trajectory Mixup — personal experiments
+# ===========================================================================
+# Four-group ablation:
+#   1) baseline             — no mixup (trajectory=×, pyramid=×)
+#   2) lap_pyramid          — pyramid only (trajectory=×, pyramid=✓)
+#   3) trajectory           — trajectory only (trajectory=✓, pyramid=×)
+#   4) trajectory_pyramid   — combined (trajectory=✓, pyramid=✓)
 #
-# Fixed: gamma=1.0, alpha=5.0, trainer_v2
+# Fixed config:
+#   - trainer_v2, v1 balance-batch sampler (real_ratio=0.5)
+#   - γ=1.0, α=5.0
+#   - DDPM: T=1000, β∈[1e-4, 0.02]
+#   - t ∈ [50, 700], cosine λ_t schedule
+#   - Effort/CLIP backbone (unchanged)
+#   - lap_num_levels=3 (pyramid modes only)
+#   - traj_num_steps=14 (K evenly-spaced t ∈ [50,700], step≈50)
 # ===========================================================================
 # Usage:
-#   bash sweep_pyramid_sampler.sh              # single GPU
-#   bash sweep_pyramid_sampler.sh 4            # 4-GPU DDP (torchrun)
+#   bash sweep_trajectory_mixup.sh              # single GPU
+#   bash sweep_trajectory_mixup.sh 4            # 4-GPU DDP (torchrun)
 set -euo pipefail
 
 YAML="./training/config/detector/effort.yaml"
-LOG_DIR_BASE="./zhiyuanyan/logs/benchv2/icml25/pyramid_sampler_sweep"
-SWEEP_LOG="sweep_pyramid_sampler.log"
+LOG_DIR_BASE="./zhiyuanyan/logs/benchv2/icml25/trajectory_mixup_sweep"
+SWEEP_LOG="sweep_trajectory_mixup.log"
 TRAIN_DS="FaceForensics++"
 VAL_DS="Celeb-DF-v2"
 TEST_DS="WDF FFIW Celeb-DF-v2 DeepFakeDetection DFDC DFDCP DeeperForensics-1.0"
@@ -23,9 +32,11 @@ NGPU=${1:-1}
 GAMMA=1.0
 ALPHA=5.0
 TRAINER=trainer_v2
+LAP_LEVELS=3
+TRAJ_STEPS=14
 
 # ── Create patched train.py copy (safe for concurrent runs) ──────────────
-TRAIN_PY="./training/train_pyramid_sweep.py"
+TRAIN_PY="./training/train_trajectory_sweep.py"
 cp ./training/train.py "$TRAIN_PY"
 sed -i "s/^from trainer\..* import Trainer/from trainer.${TRAINER} import Trainer/" "$TRAIN_PY"
 trap "rm -f $TRAIN_PY" EXIT
@@ -34,14 +45,15 @@ trap "rm -f $TRAIN_PY" EXIT
 
 run_one() {
     local TAG=$1            # display tag
-    local SAMPLER=$2        # "v1" | "v2" | "no-mixup"
-    local REAL_RATIO=${3:-0.5}
+    local MODE=$2           # mixup_mode value
+    local USE_MIXUP=$3      # true | false
+    local REAL_RATIO=${4:-0.5}
 
     local SAFE_TAG=$(echo "$TAG" | sed 's/[][ \/]/_/g')
-    local TRAIN_LOG="sweep_pyramid_${SAFE_TAG}_train.log"
+    local TRAIN_LOG="sweep_trajectory_${SAFE_TAG}_train.log"
     echo "===== $TAG ====="
 
-    TMP_YAML=$(mktemp /tmp/effort_pyramid_sweep_XXXXXX.yaml)
+    TMP_YAML=$(mktemp /tmp/effort_trajectory_XXXXXX.yaml)
     cp "$YAML" "$TMP_YAML"
 
     # ── Set sweep-specific log_dir ───────────────────────────────────────
@@ -49,28 +61,18 @@ run_one() {
     mkdir -p "$LOG_DIR"
     sed -i "s|^log_dir:.*|log_dir: ${LOG_DIR}|" "$TMP_YAML"
 
-    # ── Configure sampler and mixup ──────────────────────────────────────
-    if [ "$SAMPLER" = "no-mixup" ]; then
-        sed -i "s/^use_mixup:.*/use_mixup: false/"                       "$TMP_YAML"
-        sed -i "s/^balance_sampler_v2:.*/balance_sampler_v2: false/"      "$TMP_YAML"
-        sed -i "s/^use_balance_batch_sampler:.*/use_balance_batch_sampler: true/" "$TMP_YAML"
-        sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: 0.5/"        "$TMP_YAML"
-    elif [ "$SAMPLER" = "v2" ]; then
-        sed -i "s/^use_mixup:.*/use_mixup: true/"                         "$TMP_YAML"
-        sed -i "s/^mixup_mode:.*/mixup_mode: lap_pyramid/"                "$TMP_YAML"
-        sed -i "s/^mixup_gamma:.*/mixup_gamma: ${GAMMA}/"                 "$TMP_YAML"
-        sed -i "s/^mixup_alpha:.*/mixup_alpha: ${ALPHA}/"                 "$TMP_YAML"
-        sed -i "s/^balance_sampler_v2:.*/balance_sampler_v2: true/"       "$TMP_YAML"
-        sed -i "s/^use_balance_batch_sampler:.*/use_balance_batch_sampler: false/" "$TMP_YAML"
-    else  # v1
-        sed -i "s/^use_mixup:.*/use_mixup: true/"                         "$TMP_YAML"
-        sed -i "s/^mixup_mode:.*/mixup_mode: lap_pyramid/"                "$TMP_YAML"
-        sed -i "s/^mixup_gamma:.*/mixup_gamma: ${GAMMA}/"                 "$TMP_YAML"
-        sed -i "s/^mixup_alpha:.*/mixup_alpha: ${ALPHA}/"                 "$TMP_YAML"
-        sed -i "s/^balance_sampler_v2:.*/balance_sampler_v2: false/"      "$TMP_YAML"
-        sed -i "s/^use_balance_batch_sampler:.*/use_balance_batch_sampler: true/" "$TMP_YAML"
-        sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: ${REAL_RATIO}/" "$TMP_YAML"
-    fi
+    # ── Common: sampler + trainer settings ───────────────────────────────
+    sed -i "s/^balance_sampler_v2:.*/balance_sampler_v2: false/"      "$TMP_YAML"
+    sed -i "s/^use_balance_batch_sampler:.*/use_balance_batch_sampler: true/" "$TMP_YAML"
+    sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: ${REAL_RATIO}/" "$TMP_YAML"
+    sed -i "s/^lap_num_levels:.*/lap_num_levels: ${LAP_LEVELS}/"       "$TMP_YAML"
+    sed -i "s/^traj_num_steps:.*/traj_num_steps: ${TRAJ_STEPS}/"       "$TMP_YAML"
+
+    # ── Mixup settings ───────────────────────────────────────────────────
+    sed -i "s/^use_mixup:.*/use_mixup: ${USE_MIXUP}/"                  "$TMP_YAML"
+    sed -i "s/^mixup_mode:.*/mixup_mode: ${MODE}/"                     "$TMP_YAML"
+    sed -i "s/^mixup_gamma:.*/mixup_gamma: ${GAMMA}/"                  "$TMP_YAML"
+    sed -i "s/^mixup_alpha:.*/mixup_alpha: ${ALPHA}/"                  "$TMP_YAML"
 
     if [ "$NGPU" -gt 1 ]; then
         sed -i "s/^train_batchSize:.*/train_batchSize: $((32 * NGPU))/" "$TMP_YAML"
@@ -132,27 +134,39 @@ run_one() {
 # ═══════════════════════════════════════════════════════════════════════════
 # Experiment matrix
 # ═══════════════════════════════════════════════════════════════════════════
-# Format: "TAG" "SAMPLER" "REAL_RATIO"
+# Format: "TAG" "MIXUP_MODE" "USE_MIXUP" "REAL_RATIO"
 RUNS=(
-    # Low-real (ff-heavy) — symmetric to rr70: pair ratio ≈ 9:42:49
-    "pyramid_v1_rr30     v1   0.3"
+    # ── Ablation group ───────────────────────────────────────────────────
+    "baseline               original      false  0.5"
+    "pyramid_only           lap_pyramid   true   0.5"
+    "trajectory_only        trajectory    true   0.5"
+    "trajectory_pyramid     trajectory_pyramid  true   0.5"
 )
 
 TOTAL=${#RUNS[@]}
 echo "============================================================" | tee -a "$SWEEP_LOG"
-echo "  Pyramid Sampler Sweep — $TOTAL configs"                     | tee -a "$SWEEP_LOG"
-echo "  Fixed: γ=$GAMMA  α=$ALPHA  trainer=$TRAINER"               | tee -a "$SWEEP_LOG"
+echo "  Trajectory Mixup Sweep — $TOTAL configs"                    | tee -a "$SWEEP_LOG"
+echo "  Fixed: γ=$GAMMA  α=$ALPHA  trainer=$TRAINER  T=1000"      | tee -a "$SWEEP_LOG"
+echo "  DDPM: β∈[1e-4,0.02]  t∈[50,700]  K=${TRAJ_STEPS}  cosine λ_t"  | tee -a "$SWEEP_LOG"
+echo "  Pyramid: L=$LAP_LEVELS  (pyramid modes only)"             | tee -a "$SWEEP_LOG"
 echo "  GPU mode: NGPU=$NGPU"                                       | tee -a "$SWEEP_LOG"
 echo "  Start: $(date '+%Y-%m-%d %H:%M:%S')"                       | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
+echo "  Comparison table (theory):"                                 | tee -a "$SWEEP_LOG"
+echo "    ┌─────────────────────┬────────────┬─────────┐"           | tee -a "$SWEEP_LOG"
+echo "    │ Method              │ trajectory │ pyramid │"           | tee -a "$SWEEP_LOG"
+echo "    ├─────────────────────┼────────────┼─────────┤"           | tee -a "$SWEEP_LOG"
+echo "    │ baseline            │     ×      │    ×    │"           | tee -a "$SWEEP_LOG"
+echo "    │ pyramid_only        │     ×      │    ✓    │"           | tee -a "$SWEEP_LOG"
+echo "    │ trajectory_only     │     ✓      │    ×    │"           | tee -a "$SWEEP_LOG"
+echo "    │ trajectory_pyramid  │     ✓      │    ✓    │"           | tee -a "$SWEEP_LOG"
+echo "    └─────────────────────┴────────────┴─────────┘"           | tee -a "$SWEEP_LOG"
 echo "" | tee -a "$SWEEP_LOG"
 
 for i in "${!RUNS[@]}"; do
     idx=$((i + 1))
-    read TAG SAMPLER RR <<< "${RUNS[$i]}"
-    # Replace "—" with a safe default for no-mixup
-    RATIO_VAL=$( [ "$RR" = "—" ] && echo "n/a" || echo "$RR" )
-    run_one "[$idx/$TOTAL] $TAG" "$SAMPLER" "$RATIO_VAL"
+    read TAG MODE UM RR <<< "${RUNS[$i]}"
+    run_one "[$idx/$TOTAL] $TAG" "$MODE" "$UM" "$RR"
     echo "" | tee -a "$SWEEP_LOG"
 done
 
@@ -161,25 +175,39 @@ done
 # ═══════════════════════════════════════════════════════════════════════════
 echo "" | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
-echo "  Summary — Pyramid Sampler Comparison  ($(date '+%Y-%m-%d %H:%M'))" | tee -a "$SWEEP_LOG"
+echo "  Summary — Trajectory Mixup  ($(date '+%Y-%m-%d %H:%M'))" | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
-printf "  %-20s | %-7s | %-4s | %-9s | %-9s | %s\n" \
-    "config" "sampler" "rr" "video_auc" "auc" "acc" | tee -a "$SWEEP_LOG"
-echo "  ---------------------|---------|------|-----------|-----------|------" | tee -a "$SWEEP_LOG"
+printf "  %-22s | %-22s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+    "config" "mode" "traj" "pyr" "video_auc" "auc" "acc" | tee -a "$SWEEP_LOG"
+echo "  ------------------------|------------------------|-------|-------|-----------|-----------|------" | tee -a "$SWEEP_LOG"
+
+declare -A TRAJ_FLAG=(
+    ["baseline"]="×"
+    ["pyramid_only"]="×"
+    ["trajectory_only"]="✓"
+    ["trajectory_pyramid"]="✓"
+)
+declare -A PYR_FLAG=(
+    ["baseline"]="×"
+    ["pyramid_only"]="✓"
+    ["trajectory_only"]="×"
+    ["trajectory_pyramid"]="✓"
+)
 
 for RUN_LINE in "${RUNS[@]}"; do
-    read TAG SAMPLER RR <<< "$RUN_LINE"
+    read TAG MODE UM RR <<< "$RUN_LINE"
     LINE=$(grep "^${TAG} |" "$SWEEP_LOG" 2>/dev/null | head -1)
-    RR_DISPLAY=$( [ "$RR" = "—" ] && echo "—" || echo "$RR" )
     if [ -n "$LINE" ]; then
         B_V=$(echo "$LINE"   | sed 's/.*video_auc=\([0-9.]*\).*/\1/')
         B_AUC=$(echo "$LINE" | sed 's/.*auc=\([0-9.]*\).*/\1/')
         B_ACC=$(echo "$LINE" | sed 's/.*acc=\([0-9.]*\).*/\1/')
-        printf "  %-20s | %-7s | %-4s | %-9s | %-9s | %s\n" \
-            "$TAG" "$SAMPLER" "$RR_DISPLAY" "${B_V:-NA}" "${B_AUC:-NA}" "${B_ACC:-NA}" | tee -a "$SWEEP_LOG"
+        printf "  %-22s | %-22s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+            "$TAG" "$MODE" "${TRAJ_FLAG[$TAG]:-?}" "${PYR_FLAG[$TAG]:-?}" \
+            "${B_V:-NA}" "${B_AUC:-NA}" "${B_ACC:-NA}" | tee -a "$SWEEP_LOG"
     else
-        printf "  %-20s | %-7s | %-4s | %-9s | %-9s | %s\n" \
-            "$TAG" "$SAMPLER" "$RR_DISPLAY" "—" "—" "—" | tee -a "$SWEEP_LOG"
+        printf "  %-22s | %-22s | %-5s | %-5s | %-9s | %-9s | %s\n" \
+            "$TAG" "$MODE" "${TRAJ_FLAG[$TAG]:-?}" "${PYR_FLAG[$TAG]:-?}" \
+            "—" "—" "—" | tee -a "$SWEEP_LOG"
     fi
 done
 
