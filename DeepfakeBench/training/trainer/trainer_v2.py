@@ -1014,7 +1014,6 @@ class Trainer(object):
                             t_min=self.config.get('traj_t_min', 50),
                             t_max=self.config.get('traj_t_max', 700),
                             T=self.config.get('traj_T', 1000),
-                            num_traj_steps=self.config.get('traj_num_steps', 14),
                         )
                 elif mixup_mode == 'trajectory_pyramid':
                     from trainer.trajectory_mixup import pyramid_trajectory_mixup
@@ -1026,7 +1025,6 @@ class Trainer(object):
                             t_min=self.config.get('traj_t_min', 50),
                             t_max=self.config.get('traj_t_max', 700),
                             T=self.config.get('traj_T', 1000),
-                            num_traj_steps=self.config.get('traj_num_steps', 14),
                         )
                 # ──────────────────────────────────────────────────────────
                 else:

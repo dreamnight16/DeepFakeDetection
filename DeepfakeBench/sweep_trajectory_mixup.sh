@@ -15,7 +15,7 @@
 #   - t ∈ [50, 700], cosine λ_t schedule
 #   - Effort/CLIP backbone (unchanged)
 #   - lap_num_levels=3 (pyramid modes only)
-#   - traj_num_steps=14 (K evenly-spaced t ∈ [50,700], step≈50)
+#   - t ∼ Uniform(50, 700), continuous trajectory sampling
 # ===========================================================================
 # Usage:
 #   bash sweep_trajectory_mixup.sh              # single GPU
@@ -33,7 +33,6 @@ GAMMA=1.0
 ALPHA=5.0
 TRAINER=trainer_v2
 LAP_LEVELS=3
-TRAJ_STEPS=14
 
 # ── Create patched train.py copy (safe for concurrent runs) ──────────────
 TRAIN_PY="./training/train_trajectory_sweep.py"
@@ -66,7 +65,6 @@ run_one() {
     sed -i "s/^use_balance_batch_sampler:.*/use_balance_batch_sampler: true/" "$TMP_YAML"
     sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: ${REAL_RATIO}/" "$TMP_YAML"
     sed -i "s/^lap_num_levels:.*/lap_num_levels: ${LAP_LEVELS}/"       "$TMP_YAML"
-    sed -i "s/^traj_num_steps:.*/traj_num_steps: ${TRAJ_STEPS}/"       "$TMP_YAML"
 
     # ── Mixup settings ───────────────────────────────────────────────────
     sed -i "s/^use_mixup:.*/use_mixup: ${USE_MIXUP}/"                  "$TMP_YAML"
@@ -147,7 +145,7 @@ TOTAL=${#RUNS[@]}
 echo "============================================================" | tee -a "$SWEEP_LOG"
 echo "  Trajectory Mixup Sweep — $TOTAL configs"                    | tee -a "$SWEEP_LOG"
 echo "  Fixed: γ=$GAMMA  α=$ALPHA  trainer=$TRAINER  T=1000"      | tee -a "$SWEEP_LOG"
-echo "  DDPM: β∈[1e-4,0.02]  t∈[50,700]  K=${TRAJ_STEPS}  cosine λ_t"  | tee -a "$SWEEP_LOG"
+echo "  DDPM: β∈[1e-4,0.02]  t∼U(50,700)  cosine λ_t"            | tee -a "$SWEEP_LOG"
 echo "  Pyramid: L=$LAP_LEVELS  (pyramid modes only)"             | tee -a "$SWEEP_LOG"
 echo "  GPU mode: NGPU=$NGPU"                                       | tee -a "$SWEEP_LOG"
 echo "  Start: $(date '+%Y-%m-%d %H:%M:%S')"                       | tee -a "$SWEEP_LOG"
