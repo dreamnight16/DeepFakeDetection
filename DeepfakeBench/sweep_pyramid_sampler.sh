@@ -134,15 +134,9 @@ run_one() {
 # ═══════════════════════════════════════════════════════════════════════════
 # Format: "TAG" "SAMPLER" "REAL_RATIO"
 RUNS=(
-    # 1) pyramid + v1 (baseline, equal real/fake)
-    "pyramid_v1_rr50     v1   0.5"
-    # 2) pyramid + v2 (RF-only pairs)
-    "pyramid_v2          v2    —"
-    # 3) pyramid + v1 + high-real-image ratios
-    "pyramid_v1_rr70     v1   0.7"
-    "pyramid_v1_rr85     v1   0.85"
-    # 4) no-mixup baseline
-    "no_mixup            no-mixup  —"
+    # Low-real (ff-heavy) — verify v1-natural-like distribution
+    "pyramid_v1_rr20     v1   0.2"
+    "pyramid_v1_rr10     v1   0.1"
 )
 
 TOTAL=${#RUNS[@]}
