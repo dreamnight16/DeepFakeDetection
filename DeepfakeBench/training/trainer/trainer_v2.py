@@ -971,38 +971,21 @@ class Trainer(object):
                         selection=self.config.get('mixup_selection', 'hardest'),
                         num_levels=self.config.get('lap_num_levels', 3),
                     )
-                # ── Personal experiments: label & level ablations ─────────
-                elif mixup_mode == 'lap_pyramid_label_1':
-                    from trainer.lap_pyramid_label_variants import lap_pyramid_label_1
+                # ── Personal experiments: 2×2 label(0/1) × scope(top/bottom) ─
+                elif mixup_mode in (
+                    'lap_pyramid_label0_top', 'lap_pyramid_label0_bottom',
+                    'lap_pyramid_label1_top', 'lap_pyramid_label1_bottom',
+                ):
+                    from trainer.lap_pyramid_label_variants import lap_pyramid_label_mixup
+                    _parts = mixup_mode.split('_')  # lap_pyramid_label{0|1}_{top|bottom}
+                    _label = int(_parts[2][-1])     # 'label0' → 0, 'label1' → 1
+                    _scope = _parts[3]              # 'top' or 'bottom'
                     data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
-                        lap_pyramid_label_1(
+                        lap_pyramid_label_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
                             num_levels=self.config.get('lap_num_levels', 3),
-                        )
-                elif mixup_mode == 'lap_pyramid_label_0':
-                    from trainer.lap_pyramid_label_variants import lap_pyramid_label_0
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
-                        lap_pyramid_label_0(
-                            data_dict['image'], data_dict['label'],
-                            alpha=alpha, gamma=gamma,
-                            num_levels=self.config.get('lap_num_levels', 3),
-                        )
-                elif mixup_mode == 'lap_pyramid_top_only':
-                    from trainer.lap_pyramid_label_variants import lap_pyramid_top_only
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
-                        lap_pyramid_top_only(
-                            data_dict['image'], data_dict['label'],
-                            alpha=alpha, gamma=gamma,
-                            num_levels=self.config.get('lap_num_levels', 3),
-                        )
-                elif mixup_mode == 'lap_pyramid_bottom_only':
-                    from trainer.lap_pyramid_label_variants import lap_pyramid_bottom_only
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
-                        lap_pyramid_bottom_only(
-                            data_dict['image'], data_dict['label'],
-                            alpha=alpha, gamma=gamma,
-                            num_levels=self.config.get('lap_num_levels', 3),
+                            hard_label=_label, mix_scope=_scope,
                         )
                 # ── Diffusion Trajectory Mixup experiments ──────────────
                 elif mixup_mode == 'trajectory':

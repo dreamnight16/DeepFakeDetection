@@ -126,7 +126,7 @@ mixup_selection: hardest  # 'hardest' or 'random' — ablation experiment (only 
 lap_num_levels: 3     # K pyramid levels for lap_pyramid mode (default 3)
 
 use_balance_batch_sampler: false  # v2 (balance_sampler_v2) supersedes this
-sampler_real_ratio: 0.5  # real proportion for v1 sampler (0.5=balanced, 0.7=high-real)
+sampler_real_ratio: 0.25  # real proportion for v1 sampler (0.5=balanced, 0.25=low-real)
 
 # Balance sampler mode: set balance_sampler_v2=true to use interleaved RF pairs
 # (no RR/FF — every batch element is an explicit real+fake pair).

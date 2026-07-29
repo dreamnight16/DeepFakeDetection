@@ -1,12 +1,22 @@
 #!/bin/bash
 # ===========================================================================
-# Sweep: Laplacian Pyramid Label & Level Ablation Variants
-#   1) lap_pyramid_label_1      — soft labels all = 1 (fake)
-#   2) lap_pyramid_label_0      — soft labels all = 0 (real)
-#   3) lap_pyramid_top_only     — only mix coarsest Gaussian G_K (top)
-#   4) lap_pyramid_bottom_only  — only mix finest Laplacian L_0 (bottom)
+# Sweep: Laplacian Pyramid 2×2 Factorial Ablation (label × scope)
 #
-# Fixed: gamma=1.0, alpha=5.0, trainer_v2, v1 sampler (real_ratio=0.5)
+#   2×2 design:
+#     Factor A — hard_label:
+#       0 : RF soft label forced to 0 (real)
+#       1 : RF soft label forced to 1 (fake)
+#     Factor B — mix_scope:
+#       top    : mix only coarsest Gaussian level G_K; Laplacian from real
+#       bottom : mix only finest Laplacian level L_0; G_K & higher from real
+#
+#   Combinations:
+#     1) lap_pyramid_label0_top     — label=0, G_K only
+#     2) lap_pyramid_label0_bottom  — label=0, L_0 only
+#     3) lap_pyramid_label1_top     — label=1, G_K only
+#     4) lap_pyramid_label1_bottom  — label=1, L_0 only
+#
+# Fixed: gamma=1.0, alpha=5.0, trainer_v2, v1 sampler (real_ratio=0.25)
 # ===========================================================================
 # Usage:
 #   bash sweep_pyramid_label_variants.sh              # single GPU
@@ -55,7 +65,7 @@ run_one() {
     sed -i "s/^mixup_alpha:.*/mixup_alpha: ${ALPHA}/"                 "$TMP_YAML"
     sed -i "s/^balance_sampler_v2:.*/balance_sampler_v2: false/"      "$TMP_YAML"
     sed -i "s/^use_balance_batch_sampler:.*/use_balance_batch_sampler: true/" "$TMP_YAML"
-    sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: 0.5/"        "$TMP_YAML"
+    sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: 0.25/"       "$TMP_YAML"
 
     if [ "$NGPU" -gt 1 ]; then
         sed -i "s/^train_batchSize:.*/train_batchSize: $((32 * NGPU))/" "$TMP_YAML"
@@ -115,24 +125,28 @@ run_one() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Experiment matrix
+# 2×2 Experiment matrix: label_mode × mix_scope
 # ═══════════════════════════════════════════════════════════════════════════
 # Format: "TAG" "MIXUP_MODE"
+#   ┌──────────┬──────────────────────┬─────────────────────────┐
+#   │          │  scope = top         │  scope = bottom         │
+#   ├──────────┼──────────────────────┼─────────────────────────┤
+#   │ label=0  │  label0_top          │  label0_bottom          │
+#   │ label=1  │  label1_top          │  label1_bottom          │
+#   └──────────┴──────────────────────┴─────────────────────────┘
 RUNS=(
-    # ── Label ablations: soft label forced to 1 or 0 ─────────────────────
-    "pyramid_label_1         lap_pyramid_label_1"
-    "pyramid_label_0         lap_pyramid_label_0"
-
-    # ── Level ablations: mix only top (G_K) or bottom (L_0) ──────────────
-    "pyramid_top_only        lap_pyramid_top_only"
-    "pyramid_bottom_only     lap_pyramid_bottom_only"
+    "label0_GK-only              lap_pyramid_label0_top"
+    "label0_L0-only              lap_pyramid_label0_bottom"
+    "label1_GK-only              lap_pyramid_label1_top"
+    "label1_L0-only              lap_pyramid_label1_bottom"
 )
 
 TOTAL=${#RUNS[@]}
 echo "============================================================" | tee -a "$SWEEP_LOG"
-echo "  Pyramid Label & Level Variants Sweep — $TOTAL configs"     | tee -a "$SWEEP_LOG"
+echo "  Pyramid 2×2 Factorial Ablation — $TOTAL configs"           | tee -a "$SWEEP_LOG"
+echo "  Factors: hard_label ∈ {0, 1} × mix_scope ∈ {top, bottom}" | tee -a "$SWEEP_LOG"
 echo "  Fixed: γ=$GAMMA  α=$ALPHA  trainer=$TRAINER"               | tee -a "$SWEEP_LOG"
-echo "  Sampler: v1 balance (real_ratio=0.5)"                       | tee -a "$SWEEP_LOG"
+echo "  Sampler: v1 balance (real_ratio=0.25)"                       | tee -a "$SWEEP_LOG"
 echo "  GPU mode: NGPU=$NGPU"                                       | tee -a "$SWEEP_LOG"
 echo "  Start: $(date '+%Y-%m-%d %H:%M:%S')"                       | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
@@ -150,7 +164,7 @@ done
 # ═══════════════════════════════════════════════════════════════════════════
 echo "" | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
-echo "  Summary — Pyramid Label & Level Variants  ($(date '+%Y-%m-%d %H:%M'))" | tee -a "$SWEEP_LOG"
+echo "  Summary — Pyramid 2×2 Factorial  ($(date '+%Y-%m-%d %H:%M'))" | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
 printf "  %-25s | %-25s | %-9s | %-9s | %s\n" \
     "config" "mode" "video_auc" "auc" "acc" | tee -a "$SWEEP_LOG"

@@ -9,7 +9,7 @@
 #   4) trajectory_pyramid   — combined (trajectory=✓, pyramid=✓)
 #
 # Fixed config:
-#   - trainer_v2, v1 balance-batch sampler (real_ratio=0.5)
+#   - trainer_v2, v1 balance-batch sampler (real_ratio=0.25)
 #   - γ=1.0, α=5.0
 #   - DDPM: T=1000, β∈[1e-4, 0.02]
 #   - t ∈ [50, 700], cosine λ_t schedule
@@ -46,7 +46,7 @@ run_one() {
     local TAG=$1            # display tag
     local MODE=$2           # mixup_mode value
     local USE_MIXUP=$3      # true | false
-    local REAL_RATIO=${4:-0.5}
+    local REAL_RATIO=${4:-0.25}
 
     local SAFE_TAG=$(echo "$TAG" | sed 's/[][ \/]/_/g')
     local TRAIN_LOG="sweep_trajectory_${SAFE_TAG}_train.log"
@@ -135,10 +135,10 @@ run_one() {
 # Format: "TAG" "MIXUP_MODE" "USE_MIXUP" "REAL_RATIO"
 RUNS=(
     # ── Ablation group ───────────────────────────────────────────────────
-    "baseline               original      false  0.5"
-    "pyramid_only           lap_pyramid   true   0.5"
-    "trajectory_only        trajectory    true   0.5"
-    "trajectory_pyramid     trajectory_pyramid  true   0.5"
+    "baseline               original      false  0.25"
+    "pyramid_only           lap_pyramid   true   0.25"
+    "trajectory_only        trajectory    true   0.25"
+    "trajectory_pyramid     trajectory_pyramid  true   0.25"
 )
 
 TOTAL=${#RUNS[@]}
