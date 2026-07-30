@@ -266,8 +266,8 @@ def pyramid_trajectory_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
       2. DDPM forward with shared noise → x_t^r, x_t^f
       3. Laplacian pyramid decomposition
       4. Per-level mixing: L_k^mix = λ_{t,k}·L_k^r + (1−λ_{t,k})·L_k^f
-         where λ_{t,k} = λ_t · (1 − k/K)
-      5. Coarsest Gaussian base from fake (λ_{t,K} = 0)
+         where λ_{t,k} = λ_t · (1 − k/K) for k < K, λ_{t,K} = 1
+      5. Coarsest Gaussian base from real
       6. Reconstruct to image space
       7. Soft label: y_m = 1 − λ̄_t  where λ̄_t = Σ_{k=0}^K ω_k·λ_{t,k}
 
@@ -362,8 +362,8 @@ def pyramid_trajectory_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
         gpyr_r = build_gaussian_pyramid(x_t_r, num_levels)
         gpyr_f = build_gaussian_pyramid(x_t_f, num_levels)
 
-        # Coarsest Gaussian from fake (λ_{t,K} = λ_t·(1−K/K) = 0)
-        G_K = gpyr_f[-1]
+        # Coarsest Gaussian from real
+        G_K = gpyr_r[-1]
 
         lap_r = build_laplacian_pyramid(gpyr_r)
         lap_f = build_laplacian_pyramid(gpyr_f)
@@ -381,8 +381,8 @@ def pyramid_trajectory_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
 
             lambda_bar_t += omega[k] * lambda_tl
 
-        # Gaussian base contribution (λ_{t,K} = 0, explicit)
-        lambda_bar_t += omega[num_levels] * lam_t * 0.0
+        # Gaussian base contribution (λ_{t,K} = 1.0 = real)
+        lambda_bar_t += omega[num_levels] * 1.0
 
         # ── Reconstruct ──────────────────────────────────────────────────
         rf_x = reconstruct_from_lap(G_K, lap_mixed)
