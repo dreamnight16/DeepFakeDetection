@@ -16,7 +16,7 @@
 #     3) lap_pyramid_label1_top     — label=1, G_K only
 #     4) lap_pyramid_label1_bottom  — label=1, L_0 only
 #
-# Fixed: gamma=1.0, alpha=5.0, trainer_v2, v1 sampler (real_ratio=0.25)
+# Fixed: gamma=1.0, alpha=5.0, trainer_v2, v1 sampler (real_ratio=0.30)
 # ===========================================================================
 # Usage:
 #   bash sweep_pyramid_label_variants.sh              # single GPU
@@ -65,7 +65,7 @@ run_one() {
     sed -i "s/^mixup_alpha:.*/mixup_alpha: ${ALPHA}/"                 "$TMP_YAML"
     sed -i "s/^balance_sampler_v2:.*/balance_sampler_v2: false/"      "$TMP_YAML"
     sed -i "s/^use_balance_batch_sampler:.*/use_balance_batch_sampler: true/" "$TMP_YAML"
-    sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: 0.25/"       "$TMP_YAML"
+    sed -i "s/^sampler_real_ratio:.*/sampler_real_ratio: 0.30/"       "$TMP_YAML"
 
     if [ "$NGPU" -gt 1 ]; then
         sed -i "s/^train_batchSize:.*/train_batchSize: $((32 * NGPU))/" "$TMP_YAML"
@@ -146,7 +146,7 @@ echo "============================================================" | tee -a "$S
 echo "  Pyramid 2×2 Factorial Ablation — $TOTAL configs"           | tee -a "$SWEEP_LOG"
 echo "  Factors: hard_label ∈ {0, 1} × mix_scope ∈ {top, bottom}" | tee -a "$SWEEP_LOG"
 echo "  Fixed: γ=$GAMMA  α=$ALPHA  trainer=$TRAINER"               | tee -a "$SWEEP_LOG"
-echo "  Sampler: v1 balance (real_ratio=0.25)"                       | tee -a "$SWEEP_LOG"
+echo "  Sampler: v1 balance (real_ratio=0.30)"                       | tee -a "$SWEEP_LOG"
 echo "  GPU mode: NGPU=$NGPU"                                       | tee -a "$SWEEP_LOG"
 echo "  Start: $(date '+%Y-%m-%d %H:%M:%S')"                       | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
