@@ -39,7 +39,8 @@ from trainer.trainer_v2 import (
 
 
 def lap_pyramid_label_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
-                             epsilon=1e-8, hard_label=1, mix_scope='bottom'):
+                             epsilon=1e-8, hard_label=1, mix_scope='bottom',
+                             beta_b=None, beta_flip=False):
     """2×2 factorial Laplacian pyramid mixup.
 
     Parameters
@@ -49,6 +50,13 @@ def lap_pyramid_label_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     mix_scope : str
         'top'    — mix only coarsest Gaussian level G_K; Laplacian from real
         'bottom' — mix only finest Laplacian level L_0; G_K & higher from real
+    beta_b : float or None
+        Second Beta parameter b.  When None (default), uses symmetric
+        Beta(alpha, alpha).  When set, uses asymmetric Beta(alpha, beta_b),
+        e.g. Beta(2, 5) — left-heavy, λ ~ 0.286 on average.
+    beta_flip : bool
+        When True, λ = 1 − Beta(alpha, beta_b).  Useful for inverting the
+        asymmetry direction — e.g. with Beta(2,5), flip gives λ ~ 0.714.
 
     Returns
     -------
@@ -56,7 +64,10 @@ def lap_pyramid_label_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     mixed_y : Tensor [n]  — soft label
     mixed_label : Tensor [n]  — hard label (anchor class)
     """
-    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+    b = beta_b if beta_b is not None else alpha
+    lam = np.random.beta(alpha, b) if alpha > 0 else 1.0
+    if beta_flip:
+        lam = 1.0 - lam
     lam_t = torch.tensor(lam, dtype=torch.float32, device=x.device)
 
     index = torch.randperm(x.size(0), device=x.device)

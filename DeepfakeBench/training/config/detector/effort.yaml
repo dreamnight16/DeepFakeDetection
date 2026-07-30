@@ -122,6 +122,11 @@ hf_cutoff: 0.125      # freq cutoff fraction (only used when mix_domain='hf'), r
 mixup_gamma: 1.0      # Asymmetry intensity: γ=1 → standard Mixup labels
 mixup_k: 3            # K for multi-candidate mixup (only used when mixup_mode='asymmetric')
 mixup_alpha: 5.0      # Beta(alpha, alpha) — λ concentrates near 0.5
+mixup_beta_b: null     # Beta second param (null → symmetric Beta(α,α))
+                        # Set to e.g. 5 for asymmetric Beta(α,β):
+                        #   Beta(2,5): λ ~ 0.286 (left-heavy, more fake injection)
+                        #   With mixup_beta_flip=true: λ ~ 0.714 (right-heavy)
+mixup_beta_flip: false  # λ = 1 − Beta(α, β)
 mixup_selection: hardest  # 'hardest' or 'random' — ablation experiment (only used when mixup_mode='asymmetric')
 lap_num_levels: 3     # K pyramid levels for lap_pyramid mode (default 3)
 

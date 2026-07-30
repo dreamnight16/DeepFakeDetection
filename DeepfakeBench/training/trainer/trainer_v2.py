@@ -961,6 +961,8 @@ class Trainer(object):
                             alpha=alpha, gamma=gamma,
                             num_levels=self.config.get('lap_num_levels', 3),
                             hard_label=_label, mix_scope=_scope,
+                            beta_b=self.config.get('mixup_beta_b', None),
+                            beta_flip=self.config.get('mixup_beta_flip', False),
                         )
                 # ── Diffusion Trajectory Mixup experiments ──────────────
                 elif mixup_mode == 'trajectory':
