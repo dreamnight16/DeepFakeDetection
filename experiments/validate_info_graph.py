@@ -298,8 +298,12 @@ def extract_clip_features(clip_model, dataloader, device,
 
         # Compute attention manually from Q/K — works with ANY transformers version
         if output_attentions:
+            # Map hidden_states index → encoder layer index:
+            #   hidden_states[i>0] = output of encoder.layers[i-1]
+            #   hidden_states[-1]  = output of encoder.layers[-1]
+            enc_idx = layer_idx - 1 if layer_idx > 0 else -1
             attn_weights = extract_attention_weights(
-                clip_model.vision_model, h)
+                clip_model.vision_model, h, layer_idx=enc_idx)
             # Save FULL attention (incl CLS); build_attention_adjacency strips it
             all_attn.append(attn_weights.cpu())
 
