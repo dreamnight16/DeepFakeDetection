@@ -64,6 +64,7 @@ SEED=1024
 
 run_one() {
     local TAG=$1            # display tag
+    local EXTRA_ARGS=${2:-} # extra CLI args (--clip_layer N, --output_attentions)
 
     local SAFE_TAG=$(echo "$TAG" | sed 's/[][ \/]/_/g')
     local EXP_LOG="sweep_infograph_${SAFE_TAG}.log"
@@ -81,6 +82,7 @@ run_one() {
         --pca_dim "$PCA_DIM" \
         --gnn_k "$GNN_K" \
         --seed "$SEED" \
+        $EXTRA_ARGS \
         > "$EXP_LOG" 2>&1 || {
             echo "$TAG | RUN_ERROR" | tee -a "$SWEEP_LOG"
             return
@@ -132,13 +134,40 @@ echo "============================================================" | tee -a "$S
 echo "  Information Graph Theory — Standalone Validation"          | tee -a "$SWEEP_LOG"
 echo "  Train: $TRAIN_DS  ($MAX_TRAIN samples)"                   | tee -a "$SWEEP_LOG"
 echo "  Test:  $TEST_DS  ($MAX_TEST samples each)"                | tee -a "$SWEEP_LOG"
-echo "  PCA:  768→$PCA_DIM   GNN k=$GNN_K   seed=$SEED"           | tee -a "$SWEEP_LOG"
+echo "  PCA:  D→$PCA_DIM   GNN k=$GNN_K   seed=$SEED"            | tee -a "$SWEEP_LOG"
 echo "  Classifier: Logistic Regression (5-fold CV, C-tuned)"     | tee -a "$SWEEP_LOG"
 echo "  Start: $(date '+%Y-%m-%d %H:%M:%S')"                       | tee -a "$SWEEP_LOG"
 echo "============================================================" | tee -a "$SWEEP_LOG"
 echo "" | tee -a "$SWEEP_LOG"
 
-run_one "info_graph_validation"
+# ═══════════════════════════════════════════════════════════════════════════
+# Experiment matrix
+# ═══════════════════════════════════════════════════════════════════════════
+# Format: "TAG" "EXTRA_ARGS"
+RUNS=(
+    # ── Layer sweep: test MI/Spectrum at different ViT depths ─────────────
+    "last_layer             "
+    "layer_4                --clip_layer 4"
+    "layer_6                --clip_layer 6"
+    "layer_8                --clip_layer 8"
+    "layer_10               --clip_layer 10"
+    # ── Attention graph: use CLIP's own attention as adjacency ────────────
+    "last_layer+attn        --output_attentions"
+)
+
+TOTAL=${#RUNS[@]}
+echo "  Experiment matrix ($TOTAL configs):" | tee -a "$SWEEP_LOG"
+echo "    - last_layer:     baseline (layer 12)" | tee -a "$SWEEP_LOG"
+echo "    - layer_{4,6,8,10}: intermediate layer tokens" | tee -a "$SWEEP_LOG"
+echo "    - +attn:          CLIP self-attention as graph adjacency" | tee -a "$SWEEP_LOG"
+echo "" | tee -a "$SWEEP_LOG"
+
+for i in "${!RUNS[@]}"; do
+    idx=$((i + 1))
+    read TAG EXTRA <<< "${RUNS[$i]}"
+    run_one "[$idx/$TOTAL] $TAG" "$EXTRA"
+    echo "" | tee -a "$SWEEP_LOG"
+done
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Summary — cross-dataset comparison

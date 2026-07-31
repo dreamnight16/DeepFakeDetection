@@ -117,6 +117,7 @@ InfoGraphGNN            = _igt.InfoGraphGNN
 top_k_adjacency         = _igt.top_k_adjacency
 build_cosine_adjacency  = _igt.build_cosine_adjacency
 build_random_adjacency  = _igt.build_random_adjacency
+build_attention_adjacency = _igt.build_attention_adjacency
 
 logging.basicConfig(
     level=logging.INFO,
@@ -151,6 +152,10 @@ def parse_args():
     p.add_argument('--pca_dim', type=int, default=32)
     p.add_argument('--gnn_k', type=int, default=10,
                    help='top-k edges per node for GNN sparsification')
+    p.add_argument('--clip_layer', type=int, default=None,
+                   help='CLIP ViT layer to extract tokens from (None=last)')
+    p.add_argument('--output_attentions', action='store_true', default=False,
+                   help='also extract CLIP attention matrices as graph adjacency')
     p.add_argument('--device', type=str, default='cuda')
     p.add_argument('--seed', type=int, default=1024)
     p.add_argument('--output_dir', type=str, default=_DEFAULT_OUTPUT_DIR)
@@ -226,14 +231,25 @@ def build_dataloader(cfg, mode, dataset_name, max_samples=None):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @torch.no_grad()
-def extract_clip_features(clip_model, dataloader, device):
-    """Extract patch tokens + CLS token from frozen CLIP ViT-L/14.
+def extract_clip_features(clip_model, dataloader, device,
+                          output_attentions=False,
+                          target_layer=None):
+    """Extract patch tokens + CLS token from frozen CLIP ViT.
+
+    Args:
+        clip_model: frozen CLIPModel
+        dataloader: DataLoader
+        device: torch device
+        output_attentions: if True, also return last-layer attention matrices
+        target_layer: if set (e.g. 6), use hidden_states[target_layer]
+                      instead of the last layer. None = last layer.
 
     Returns:
         dict:
-            patch_tokens: [N, 196, 768]   patch tokens (CLS excluded)
-            cls_token:    [N, 768]         CLS token
-            labels:       [N]              binary labels (0=real, 1=fake)
+            patch_tokens: [N, 196, D]   patch tokens (CLS excluded)
+            cls_token:    [N, D]         CLS token
+            labels:       [N]            binary labels (0=real, 1=fake)
+            attentions:   [N, heads, 196, 196]  (only if output_attentions)
     """
     clip_model.eval()
     clip_model.to(device)
@@ -241,47 +257,61 @@ def extract_clip_features(clip_model, dataloader, device):
     all_patches = []
     all_cls = []
     all_labels = []
+    all_attn = [] if output_attentions else None
 
     for batch in tqdm(dataloader, desc='Extracting CLIP features', leave=False):
         images = batch['image'].to(device)
         labels = batch['label']
-        # Map label to binary: 0=real, 1=fake
         labels = torch.where(labels != 0, torch.tensor(1), torch.tensor(0))
 
-        # Handle multi-crop: take the full image (index 0)
         if len(images.shape) == 5:
             images = images[:, 0, :, :, :]  # [B, 3, H, W]
 
-        # Forward through vision model with hidden states
         outputs = clip_model.vision_model(
             images,
             output_hidden_states=True,
+            output_attentions=output_attentions,
         )
 
-        # Handle both tuple output (older transformers) and dict output
+        # Handle tuple (older transformers) and dict output
         if isinstance(outputs, (tuple, list)):
-            last_hidden_state = outputs[0]
-        elif hasattr(outputs, 'last_hidden_state'):
-            last_hidden_state = outputs.last_hidden_state
+            hidden_states = outputs[2] if len(outputs) > 2 else [outputs[0]]
+            attn_tuple = outputs[3] if output_attentions and len(outputs) > 3 else None
+        elif hasattr(outputs, 'hidden_states'):
+            hidden_states = outputs.hidden_states
+            attn_tuple = outputs.attentions if output_attentions else None
         else:
-            last_hidden_state = outputs[0]
+            hidden_states = [outputs[0]]
+            attn_tuple = None
 
-        # Last hidden state: [B, 197, 768]  (1 CLS + 196 patches)
-        # CLS token (index 0)
-        cls_tok = last_hidden_state[:, 0, :]           # [B, 768]
+        # Select target layer
+        layer_idx = target_layer if target_layer is not None else -1
+        h = hidden_states[layer_idx]  # [B, 197, D]
 
-        # Patch tokens (indices 1..196)
-        patch_tok = last_hidden_state[:, 1:, :]        # [B, 196, 768]
+        # CLS token
+        cls_tok = h[:, 0, :]
+        # Patch tokens
+        patch_tok = h[:, 1:, :]
 
         all_patches.append(patch_tok.cpu())
         all_cls.append(cls_tok.cpu())
         all_labels.append(labels)
 
-    return {
-        'patch_tokens': torch.cat(all_patches, dim=0),   # [N, 196, 768]
-        'cls_token':    torch.cat(all_cls, dim=0),        # [N, 768]
-        'labels':       torch.cat(all_labels, dim=0),     # [N]
+        # Capture last-layer attention (patch-only, averaged over heads)
+        if output_attentions and attn_tuple is not None:
+            last_attn = attn_tuple[-1]  # [B, heads, 197, 197]
+            patch_attn = last_attn[:, :, 1:, 1:].cpu()  # [B, heads, 196, 196]
+            all_attn.append(patch_attn)
+
+    result = {
+        'patch_tokens': torch.cat(all_patches, dim=0),
+        'cls_token':    torch.cat(all_cls, dim=0),
+        'labels':       torch.cat(all_labels, dim=0),
     }
+    if output_attentions:
+        result['attentions'] = torch.cat(all_attn, dim=0)  # [N, heads, 196, 196]
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -331,24 +361,26 @@ def compute_all_features(
     pca,
     device='cpu',
     gnn_k=10,
+    train_attentions=None,
+    test_attentions_dict=None,
 ):
     """Compute all feature sets for all data splits.
 
     Args:
-        train_patches:       [N_train, 196, 768]
-        train_cls:           [N_train, 768]
-        test_patches_dict:   {dataset_name: [N_test, 196, 768]}
-        test_cls_dict:       {dataset_name: [N_test, 768]}
+        train_patches:       [N_train, 196, D]
+        train_cls:           [N_train, D]
+        test_patches_dict:   {dataset_name: [N_test, 196, D]}
+        test_cls_dict:       {dataset_name: [N_test, D]}
         pca:                 fitted sklearn PCA
         device:              torch device
         gnn_k:               top-k for GNN adjacency
+        train_attentions:    [N_train, heads, 196, 196] or None
+        test_attentions_dict:{name: [N_test, heads, 196, 196]} or None
 
     Returns:
-        dict: {method_name: {
-            'train': np.ndarray,  # [N_train, F]
-            'test':  {name: np.ndarray},  # [N_test, F]
-        }}
+        dict: {method_name: {'train': np.ndarray, 'test': {name: np.ndarray}}}
     """
+    output_attn = train_attentions is not None
     logger.info('Projecting patch tokens via PCA...')
     z_train = project_pca(train_patches, pca).to(device)
     z_test = {k: project_pca(v, pca).to(device)
@@ -544,6 +576,43 @@ def compute_all_features(
         'test':  {k: v['f_spec'].numpy() for k, v in spec_rand_test.items()},
     }
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # Methods 11-12: Attention Graph (only when --output_attentions)
+    # ═══════════════════════════════════════════════════════════════════════
+    if output_attn:
+        logger.info('[11/12] Attention Spectrum')
+        attn_A_train = build_attention_adjacency(train_attentions.to(device))
+        spec_attn_train = compute_spec_batched(attn_A_train)
+
+        # Pre-compute attention adjacency for all test sets
+        attn_A_test_dict = {}
+        spec_attn_test = {}
+        for k, v in test_attentions_dict.items():
+            attn_A_t = build_attention_adjacency(v.to(device))
+            attn_A_test_dict[k] = attn_A_t
+            spec_attn_test[k] = compute_spec_batched(attn_A_t)
+
+        features['Attn Spectrum'] = {
+            'train': spec_attn_train['f_spec'].numpy(),
+            'test':  {k: v['f_spec'].numpy() for k, v in spec_attn_test.items()},
+        }
+
+        logger.info('[12/12] Attention GNN')
+        attn_A_train_k = top_k_adjacency(attn_A_train, k=gnn_k).to(device)
+        with torch.no_grad():
+            z_attn_gnn_train = gnn(train_patches_gpu, attn_A_train_k).cpu().numpy()
+
+        z_attn_gnn_test = {}
+        for k, v in test_patches_gpu.items():
+            attn_A_t_k = top_k_adjacency(attn_A_test_dict[k], k=gnn_k).to(device)
+            with torch.no_grad():
+                z_attn_gnn_test[k] = gnn(v, attn_A_t_k).cpu().numpy()
+
+        features['Attn GNN'] = {
+            'train': z_attn_gnn_train,
+            'test':  z_attn_gnn_test,
+        }
+
     return features
 
 
@@ -716,14 +785,23 @@ def main():
         )
 
     # ── Extract CLIP features ───────────────────────────────────────────────
-    logger.info('Extracting CLIP features from train set...')
-    train_feat = extract_clip_features(clip_model, train_loader, device)
+    layer_tag = f'L{args.clip_layer}' if args.clip_layer is not None else 'last'
+    logger.info(f'Extracting CLIP features from train set (layer={layer_tag})...')
+    train_feat = extract_clip_features(
+        clip_model, train_loader, device,
+        output_attentions=args.output_attentions,
+        target_layer=args.clip_layer,
+    )
     logger.info(f'Train: {train_feat["patch_tokens"].shape[0]} samples')
 
     test_feat = {}
     for ds_name, loader in test_loaders.items():
         logger.info(f'Extracting CLIP features from {ds_name}...')
-        test_feat[ds_name] = extract_clip_features(clip_model, loader, device)
+        test_feat[ds_name] = extract_clip_features(
+            clip_model, loader, device,
+            output_attentions=args.output_attentions,
+            target_layer=args.clip_layer,
+        )
         logger.info(f'  {ds_name}: {test_feat[ds_name]["patch_tokens"].shape[0]} samples')
 
     # ── Fit PCA on pooled train patches ────────────────────────────────────
@@ -732,6 +810,8 @@ def main():
     # ── Compute all features ───────────────────────────────────────────────
     test_patches = {k: v['patch_tokens'] for k, v in test_feat.items()}
     test_cls = {k: v['cls_token'] for k, v in test_feat.items()}
+    train_attn = train_feat.get('attentions')
+    test_attn = {k: v.get('attentions') for k, v in test_feat.items()} if args.output_attentions else None
 
     all_features = compute_all_features(
         train_patches=train_feat['patch_tokens'],
@@ -741,6 +821,8 @@ def main():
         pca=pca,
         device=device,
         gnn_k=args.gnn_k,
+        train_attentions=train_attn,
+        test_attentions_dict=test_attn,
     )
 
     # ── Evaluate ───────────────────────────────────────────────────────────

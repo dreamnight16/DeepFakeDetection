@@ -124,6 +124,41 @@ def build_random_adjacency(
     return rand_weights.unsqueeze(0)
 
 
+def build_attention_adjacency(attentions: torch.Tensor) -> torch.Tensor:
+    """Build adjacency from CLIP self-attention matrices.
+
+    Averages over attention heads, extracts patch-to-patch submatrix
+    (excluding CLS token), and symmetrizes.
+
+    Theory:
+        CLIP attention weights already encode learned inter-token
+        dependencies — a more natural graph than Pearson correlation.
+        Attention at different layers captures different levels of
+        abstraction: early layers = texture, late layers = semantics.
+
+    Args:
+        attentions: [B, heads, 197, 197] attention from one layer
+                    (197 = 1 CLS + 196 patches for ViT-L/14 @ 224)
+
+    Returns:
+        A: [B, 196, 196] patch-to-patch attention adjacency (symmetrized)
+    """
+    # Average over attention heads
+    A_avg = attentions.mean(dim=1)  # [B, 197, 197]
+
+    # Remove CLS token (index 0) → patch-to-patch only
+    A_patch = A_avg[:, 1:, 1:]  # [B, 196, 196]
+
+    # Symmetrize: A = (A + A^T) / 2
+    A_sym = (A_patch + A_patch.transpose(1, 2)) / 2.0
+
+    # Zero diagonal
+    B, N = A_sym.shape[:2]
+    A_sym[:, torch.arange(N), torch.arange(N)] = 0.0
+
+    return A_sym
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Mutual Information Analyzer
 # ═══════════════════════════════════════════════════════════════════════════════
