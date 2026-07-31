@@ -301,18 +301,22 @@ def extract_clip_features(clip_model, dataloader, device,
         all_labels.append(labels)
 
         # Capture last-layer attention (patch-only, averaged over heads)
-        if output_attentions and attn_tuple is not None:
-            last_attn = attn_tuple[-1]  # [B, heads, 197, 197]
-            patch_attn = last_attn[:, :, 1:, 1:].cpu()  # [B, heads, 196, 196]
-            all_attn.append(patch_attn)
+        if output_attentions and attn_tuple is not None and len(attn_tuple) > 0:
+            last_attn = attn_tuple[-1]
+            if last_attn is not None:
+                patch_attn = last_attn[:, :, 1:, 1:].cpu()  # [B, heads, 196, 196]
+                all_attn.append(patch_attn)
 
     result = {
         'patch_tokens': torch.cat(all_patches, dim=0),
         'cls_token':    torch.cat(all_cls, dim=0),
         'labels':       torch.cat(all_labels, dim=0),
     }
-    if output_attentions:
+    if output_attentions and len(all_attn) > 0:
         result['attentions'] = torch.cat(all_attn, dim=0)  # [N, heads, 196, 196]
+    elif output_attentions:
+        logger.warning('output_attentions=True but no attention captured '
+                       '(old transformers version?). Skipping attention features.')
 
     return result
 
