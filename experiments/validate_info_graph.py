@@ -254,7 +254,7 @@ def extract_clip_features(clip_model, dataloader, device,
             patch_tokens: [N, 196, D]   patch tokens (CLS excluded)
             cls_token:    [N, D]         CLS token
             labels:       [N]            binary labels
-            attentions:   [N, heads, 196, 196]  (only if output_attentions)
+            attentions:   [N, heads, N_tok, N_tok]  (only if output_attentions, incl CLS)
     """
     clip_model.eval()
     clip_model.to(device)
@@ -300,8 +300,8 @@ def extract_clip_features(clip_model, dataloader, device,
         if output_attentions:
             attn_weights = extract_attention_weights(
                 clip_model.vision_model, h)
-            patch_attn = attn_weights[:, :, 1:, 1:].cpu()  # [B, heads, 196, 196]
-            all_attn.append(patch_attn)
+            # Save FULL attention (incl CLS); build_attention_adjacency strips it
+            all_attn.append(attn_weights.cpu())
 
     result = {
         'patch_tokens': torch.cat(all_patches, dim=0),
