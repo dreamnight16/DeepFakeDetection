@@ -298,7 +298,7 @@ def fit_pca(patch_tokens, n_components=32):
     """
     N, n_patches, D = patch_tokens.shape
     flat = patch_tokens.reshape(-1, D).numpy()  # [N*196, 768]
-    logger.info(f'Fitting PCA(768→{n_components}) on {flat.shape[0]} patch tokens')
+    logger.info(f'Fitting PCA({D}→{n_components}) on {flat.shape[0]} patch tokens')
     pca = PCA(n_components=n_components, random_state=1024)
     pca.fit(flat)
     logger.info(f'PCA explained variance: {pca.explained_variance_ratio_.sum():.4f}')
@@ -366,7 +366,8 @@ def compute_all_features(
 
     # ── GNN model (untrained — we train LR on its frozen random embeddings
     #     to verify the graph structure ITSELF carries information) ──────────
-    gnn = InfoGraphGNN(in_dim=768, hidden_dim=256, out_dim=128, dropout=0.2)
+    token_dim = train_patches_gpu.shape[2]  # 1024 for ViT-L/14, 768 for ViT-B/16
+    gnn = InfoGraphGNN(in_dim=token_dim, hidden_dim=256, out_dim=128, dropout=0.2)
     gnn.to(device)
     gnn.eval()
 
