@@ -121,6 +121,7 @@ top_k_adjacency         = _igt.top_k_adjacency
 build_cosine_adjacency  = _igt.build_cosine_adjacency
 build_random_adjacency  = _igt.build_random_adjacency
 build_attention_adjacency = _igt.build_attention_adjacency
+extract_attention_weights = _igt.extract_attention_weights
 
 logging.basicConfig(
     level=logging.INFO,
@@ -243,7 +244,8 @@ def extract_clip_features(clip_model, dataloader, device,
         clip_model: frozen CLIPModel
         dataloader: DataLoader
         device: torch device
-        output_attentions: if True, also return last-layer attention matrices
+        output_attentions: if True, compute attention weights from Q/K proj
+                           (works with ANY transformers version)
         target_layer: if set (e.g. 6), use hidden_states[target_layer]
                       instead of the last layer. None = last layer.
 
@@ -251,7 +253,7 @@ def extract_clip_features(clip_model, dataloader, device,
         dict:
             patch_tokens: [N, 196, D]   patch tokens (CLS excluded)
             cls_token:    [N, D]         CLS token
-            labels:       [N]            binary labels (0=real, 1=fake)
+            labels:       [N]            binary labels
             attentions:   [N, heads, 196, 196]  (only if output_attentions)
     """
     clip_model.eval()
@@ -260,7 +262,7 @@ def extract_clip_features(clip_model, dataloader, device,
     all_patches = []
     all_cls = []
     all_labels = []
-    all_attn = [] if output_attentions else None
+    all_attn = []
 
     for batch in tqdm(dataloader, desc='Extracting CLIP features', leave=False):
         images = batch['image'].to(device)
@@ -268,44 +270,38 @@ def extract_clip_features(clip_model, dataloader, device,
         labels = torch.where(labels != 0, torch.tensor(1), torch.tensor(0))
 
         if len(images.shape) == 5:
-            images = images[:, 0, :, :, :]  # [B, 3, H, W]
+            images = images[:, 0, :, :, :]
 
         outputs = clip_model.vision_model(
             images,
             output_hidden_states=True,
-            output_attentions=output_attentions,
         )
 
         # Handle tuple (older transformers) and dict output
         if isinstance(outputs, (tuple, list)):
             hidden_states = outputs[2] if len(outputs) > 2 else [outputs[0]]
-            attn_tuple = outputs[3] if output_attentions and len(outputs) > 3 else None
         elif hasattr(outputs, 'hidden_states'):
             hidden_states = outputs.hidden_states
-            attn_tuple = outputs.attentions if output_attentions else None
         else:
             hidden_states = [outputs[0]]
-            attn_tuple = None
 
         # Select target layer
         layer_idx = target_layer if target_layer is not None else -1
         h = hidden_states[layer_idx]  # [B, 197, D]
 
-        # CLS token
         cls_tok = h[:, 0, :]
-        # Patch tokens
         patch_tok = h[:, 1:, :]
 
         all_patches.append(patch_tok.cpu())
         all_cls.append(cls_tok.cpu())
         all_labels.append(labels)
 
-        # Capture last-layer attention (patch-only, averaged over heads)
-        if output_attentions and attn_tuple is not None and len(attn_tuple) > 0:
-            last_attn = attn_tuple[-1]
-            if last_attn is not None:
-                patch_attn = last_attn[:, :, 1:, 1:].cpu()  # [B, heads, 196, 196]
-                all_attn.append(patch_attn)
+        # Compute attention manually from Q/K — works with ANY transformers version
+        if output_attentions:
+            attn_weights = extract_attention_weights(
+                clip_model.vision_model, h)
+            patch_attn = attn_weights[:, :, 1:, 1:].cpu()  # [B, heads, 196, 196]
+            all_attn.append(patch_attn)
 
     result = {
         'patch_tokens': torch.cat(all_patches, dim=0),
@@ -313,10 +309,7 @@ def extract_clip_features(clip_model, dataloader, device,
         'labels':       torch.cat(all_labels, dim=0),
     }
     if output_attentions and len(all_attn) > 0:
-        result['attentions'] = torch.cat(all_attn, dim=0)  # [N, heads, 196, 196]
-    elif output_attentions:
-        logger.warning('output_attentions=True but no attention captured '
-                       '(old transformers version?). Skipping attention features.')
+        result['attentions'] = torch.cat(all_attn, dim=0)
 
     return result
 

@@ -159,6 +159,74 @@ def build_attention_adjacency(attentions: torch.Tensor) -> torch.Tensor:
     return A_sym
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Attention extraction — works with ANY transformers version
+# ═══════════════════════════════════════════════════════════════════════════
+
+@torch.no_grad()
+def extract_attention_weights(vision_model, hidden_states, layer_idx=-1):
+    """Manually compute self-attention weights from CLIP ViT Q/K projections.
+
+    Works with ANY transformers version because it directly accesses
+    the Q/K projection matrices — no dependency on the output_attentions
+    API parameter.
+
+    Theory:
+        A = softmax(Q @ K^T / sqrt(d_head))
+        Q = hidden @ W_q,  K = hidden @ W_k
+
+    The resulting attention weights encode learned inter-token dependencies
+    that CLIP discovered during pre-training — a much more natural graph
+    adjacency than Pearson correlation or cosine similarity.
+
+    Args:
+        vision_model: CLIPVisionTransformer (clip_model.vision_model)
+        hidden_states: [B, 197, D] hidden states from any ViT layer
+        layer_idx: which encoder layer's Q/K to use (-1 = last layer)
+
+    Returns:
+        attn_weights: [B, num_heads, 197, 197] softmax attention weights
+    """
+    layer = vision_model.encoder.layers[layer_idx]
+    attn = layer.self_attn
+
+    # Project to Q, K
+    B, N, D = hidden_states.shape
+    q = attn.q_proj(hidden_states)  # [B, N, D]
+    k = attn.k_proj(hidden_states)  # [B, N, D]
+
+    # Reshape for multi-head attention
+    num_heads = attn.num_heads
+    head_dim = D // num_heads
+
+    q = q.reshape(B, N, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, N, d]
+    k = k.reshape(B, N, num_heads, head_dim).permute(0, 2, 1, 3)  # [B, H, N, d]
+
+    # Scaled dot-product attention weights
+    scale = head_dim ** -0.5
+    attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, H, N, N]
+    attn_weights = F.softmax(attn_weights, dim=-1)
+
+    return attn_weights
+
+
+def build_attention_adjacency_from_hidden(vision_model, hidden_states):
+    """Build attention adjacency directly from hidden states + Q/K weights.
+
+    Shortcut: compute attention → average heads → remove CLS → symmetrize.
+    Works with any transformers version.
+
+    Args:
+        vision_model:  CLIPVisionTransformer
+        hidden_states: [B, 197, D] hidden states from any ViT layer
+
+    Returns:
+        A: [B, 196, 196] patch-to-patch attention adjacency
+    """
+    attn = extract_attention_weights(vision_model, hidden_states)
+    return build_attention_adjacency(attn)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. Mutual Information Analyzer
 # ═══════════════════════════════════════════════════════════════════════════════
