@@ -38,7 +38,7 @@ SEED=1024
 
 run_one() {
     local TAG=$1
-    local DETECTOR=$2
+    local CONFIG_KEY=$2
 
     local SAFE_TAG=$(echo "$TAG" | sed 's/[][ \/()]/_/g')
     local EXP_LOG="sweep_video_${SAFE_TAG}.log"
@@ -56,7 +56,7 @@ run_one() {
         --epochs "$EPOCHS" \
         --lr "$LR" \
         --seed "$SEED" \
-        --detector "$DETECTOR" \
+        --config_key "$CONFIG_KEY" \
         > "$EXP_LOG" 2>&1 || {
             echo "$TAG | RUN_ERROR" | tee -a "$SWEEP_LOG"
             return
@@ -94,17 +94,33 @@ echo "============================================================" | tee -a "$S
 echo "" | tee -a "$SWEEP_LOG"
 
 RUNS=(
-    "Baseline            all"
-    "MI-T                mi"
-    "GT                  gt"
-    "GNN                 gnn"
+    # ── A: Baseline ───────────────────────────────────────────────────────
+    "Baseline            A1"
+    # ── B: MI-D ───────────────────────────────────────────────────────────
+    "MI-T                B1"
+    "MI-S                B2"
+    "MI-F                B3"
+    "MI-All              B4"
+    # ── C: GT-D ───────────────────────────────────────────────────────────
+    "GT-Temporal         C2"
+    "GT-Spatial          C3"
+    "GT-Full             C4"
+    # ── D: GNN-D ──────────────────────────────────────────────────────────
+    "GNN-MLP             D1"
+    "GNN-GCN             D2"
+    "GNN-GAT             D3"
+    "GNN-STGCN           D4"
+    # ── E: Fusion ─────────────────────────────────────────────────────────
+    "MI+GT               E1"
+    "GT+GNN              E2"
+    "MI+GT+GNN           E3"
 )
 
 TOTAL=${#RUNS[@]}
 for i in "${!RUNS[@]}"; do
     idx=$((i + 1))
-    read TAG DETECTOR <<< "${RUNS[$i]}"
-    run_one "[$idx/$TOTAL] $TAG" "$DETECTOR"
+    read TAG CONFIG_KEY <<< "${RUNS[$i]}"
+    run_one "[$idx/$TOTAL] $TAG" "$CONFIG_KEY"
     echo "" | tee -a "$SWEEP_LOG"
 done
 

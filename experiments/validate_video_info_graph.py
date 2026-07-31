@@ -93,9 +93,10 @@ MutualInformationAnalyzer = _igt.MutualInformationAnalyzer
 _vid_path = os.path.join(_training_dir, 'detectors', 'video_info_detectors.py')
 _vid = _iu.module_from_spec(_iu.spec_from_file_location('video_info', _vid_path))
 _iu.spec_from_file_location('video_info', _vid_path).loader.exec_module(_vid)
-MIDetector  = _vid.MIDetector
-GTDetector  = _vid.GTDetector
-GNNDetector = _vid.GNNDetector
+MIDetector    = _vid.MIDetector
+GTDetector    = _vid.GTDetector
+GNNDetector   = _vid.GNNDetector
+FusionDetector = _vid.FusionDetector
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s | %(levelname)-8s | %(message)s',
@@ -126,8 +127,8 @@ def parse_args():
     p.add_argument('--output_dir', default=_DEFAULT_OUTPUT_DIR)
     p.add_argument('--epochs', type=int, default=20)
     p.add_argument('--lr', type=float, default=1e-3)
-    p.add_argument('--detector', default='all',
-                   choices=['mi', 'gt', 'gnn', 'all'])
+    p.add_argument('--config_key', default=None,
+                   help='Run a single config (e.g. B1, C2). Omit to run all.')
     return p.parse_args()
 
 
@@ -361,26 +362,143 @@ class BaselineDetector(nn.Module):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 DETECTOR_CONFIGS = {
-    # ── Baseline ──────────────────────────────────────────────────────────
-    'Baseline': {
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section A: Baseline
+    # ═══════════════════════════════════════════════════════════════════════
+    'A1 Baseline': {
         'cls': BaselineDetector,
         'kwargs': {},
+        'section': 'Baseline',
     },
-    # ── MI-D ablations ────────────────────────────────────────────────────
-    'MI-T (temporal)': {
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section B: MI-D — Mutual Information Detector
+    # ═══════════════════════════════════════════════════════════════════════
+    'B1 MI-T (temporal)': {
         'cls': MIDetector,
-        'kwargs': {'use_temporal': True, 'use_spatial': False},
+        'kwargs': {'use_temporal': True, 'use_spatial': False,
+                    'use_frequency': False},
+        'section': 'MI-D',
     },
-    # ── GT-D ──────────────────────────────────────────────────────────────
-    'GT (topology)': {
+    'B2 MI-S (spatial)': {
+        'cls': MIDetector,
+        'kwargs': {'use_temporal': False, 'use_spatial': True,
+                    'use_frequency': False},
+        'section': 'MI-D',
+    },
+    'B3 MI-F (frequency)': {
+        'cls': MIDetector,
+        'kwargs': {'use_temporal': False, 'use_spatial': False,
+                    'use_frequency': True},
+        'section': 'MI-D',
+    },
+    'B4 MI-All': {
+        'cls': MIDetector,
+        'kwargs': {'use_temporal': True, 'use_spatial': True,
+                    'use_frequency': True},
+        'section': 'MI-D',
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section C: GT-D — Graph Topology Detector
+    # ═══════════════════════════════════════════════════════════════════════
+    'C1 GT-NoGraph (pool)': {
         'cls': GTDetector,
-        'kwargs': {'use_smoothness': True, 'use_spectrum': True,
-                    'use_entropy': True},
+        'kwargs': {'use_temporal': False, 'use_spatial': False,
+                    'use_full': False},
+        'section': 'GT-D',
+        '_note': 'fallback: empty graph → mean pool of cls_seq',
     },
-    # ── GNN-D ─────────────────────────────────────────────────────────────
-    'GNN (ST-GCN)': {
+    'C2 GT-Temporal': {
+        'cls': GTDetector,
+        'kwargs': {'use_temporal': True, 'use_spatial': False,
+                    'use_full': False},
+        'section': 'GT-D',
+    },
+    'C3 GT-Spatial': {
+        'cls': GTDetector,
+        'kwargs': {'use_temporal': False, 'use_spatial': True,
+                    'use_full': False},
+        'section': 'GT-D',
+    },
+    'C4 GT-Full': {
+        'cls': GTDetector,
+        'kwargs': {'use_temporal': True, 'use_spatial': True,
+                    'use_full': True},
+        'section': 'GT-D',
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section D: GNN-D — Graph Neural Network Detector
+    # ═══════════════════════════════════════════════════════════════════════
+    'D1 GNN-MLP (no graph)': {
         'cls': GNNDetector,
-        'kwargs': {'use_spatial': True, 'use_temporal': True},
+        'kwargs': {'variant': 'mlp'},
+        'section': 'GNN-D',
+    },
+    'D2 GNN-GCN': {
+        'cls': GNNDetector,
+        'kwargs': {'variant': 'gcn'},
+        'section': 'GNN-D',
+    },
+    'D3 GNN-GAT': {
+        'cls': GNNDetector,
+        'kwargs': {'variant': 'gat'},
+        'section': 'GNN-D',
+    },
+    'D4 GNN-STGCN': {
+        'cls': GNNDetector,
+        'kwargs': {'variant': 'stgcn'},
+        'section': 'GNN-D',
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Section E: Fusion — cross-module combinations
+    # ═══════════════════════════════════════════════════════════════════════
+    'E1 MI+GT': {
+        'cls': FusionDetector,
+        'kwargs': {
+            'detectors': None,  # built dynamically below
+        },
+        'section': 'Fusion',
+        '_dynamic': True,
+        '_sub_detectors': {
+            'mi':  {'cls': MIDetector,
+                    'kwargs': {'use_temporal': True, 'use_spatial': True,
+                               'use_frequency': False}},
+            'gt':  {'cls': GTDetector,
+                    'kwargs': {'use_temporal': True, 'use_spatial': False,
+                               'use_full': False}},
+        },
+    },
+    'E2 GT+GNN': {
+        'cls': FusionDetector,
+        'kwargs': {'detectors': None},
+        'section': 'Fusion',
+        '_dynamic': True,
+        '_sub_detectors': {
+            'gt':  {'cls': GTDetector,
+                    'kwargs': {'use_temporal': True, 'use_spatial': False,
+                               'use_full': False}},
+            'gnn': {'cls': GNNDetector,
+                    'kwargs': {'variant': 'gcn'}},
+        },
+    },
+    'E3 MI+GT+GNN': {
+        'cls': FusionDetector,
+        'kwargs': {'detectors': None},
+        'section': 'Fusion',
+        '_dynamic': True,
+        '_sub_detectors': {
+            'mi':  {'cls': MIDetector,
+                    'kwargs': {'use_temporal': True, 'use_spatial': True,
+                               'use_frequency': False}},
+            'gt':  {'cls': GTDetector,
+                    'kwargs': {'use_temporal': True, 'use_spatial': False,
+                               'use_full': False}},
+            'gnn': {'cls': GNNDetector,
+                    'kwargs': {'variant': 'gcn'}},
+        },
     },
 }
 
@@ -434,11 +552,23 @@ def main():
     # ── Run ablation ──────────────────────────────────────────────────────
     results = {}
     for name, cfg_item in DETECTOR_CONFIGS.items():
-        if args.detector != 'all' and args.detector not in name.lower():
+        if args.config_key and not name.startswith(args.config_key):
             continue
 
         logger.info(f'--- {name} ---')
-        model = cfg_item['cls'](**cfg_item['kwargs'])
+
+        # Handle dynamic fusion configs
+        if cfg_item.get('_dynamic'):
+            sub = {}
+            for sub_name, sub_cfg in cfg_item['_sub_detectors'].items():
+                sub[sub_name] = sub_cfg['cls'](**sub_cfg['kwargs'])
+            cfg_item['kwargs']['detectors'] = sub
+
+        # Handle GT-NoGraph fallback: use BaselineDetector instead
+        if 'C1 GT-NoGraph' in name:
+            model = BaselineDetector()
+        else:
+            model = cfg_item['cls'](**cfg_item['kwargs'])
 
         try:
             model = train_detector(model, train_feat, device,
