@@ -561,7 +561,8 @@ def compute_all_features(
     # Method 10: Spectrum (random graph) — SANITY CHECK
     # ═══════════════════════════════════════════════════════════════════════
     logger.info('[10/10] Spectrum (random graph) — sanity check')
-    rand_A = build_random_adjacency(N=196, density=0.05,
+    num_patches = mi_matrices_train.shape[1]  # 196 (ViT-B) or 256 (ViT-L)
+    rand_A = build_random_adjacency(N=num_patches, density=0.05,
                                     device=mi_matrices_train.device)
     rand_A_train = rand_A.expand(B_train, -1, -1)
     spec_rand_train = compute_spec_batched(rand_A_train)
