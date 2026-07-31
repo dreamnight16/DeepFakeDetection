@@ -638,8 +638,6 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
                 landmark_tensors = torch.stack(landmark_tensors, dim=0)
             if not any(m is None or (isinstance(m, list) and None in m) for m in mask_tensors):
                 mask_tensors = torch.stack(mask_tensors, dim=0)
-            # Video mode: texture_scores not supported → set to None
-            texture_score_tensors = None
         else:
             # Get the first image tensor
             image_tensors = image_tensors[0]
