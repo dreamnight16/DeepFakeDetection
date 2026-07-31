@@ -256,17 +256,22 @@ def extract_clip_features(clip_model, dataloader, device):
         outputs = clip_model.vision_model(
             images,
             output_hidden_states=True,
-            return_dict=True,
         )
 
-        # Last hidden state: [B, 197, 768]  (1 CLS + 196 patches)
-        hidden = outputs.last_hidden_state
+        # Handle both tuple output (older transformers) and dict output
+        if isinstance(outputs, (tuple, list)):
+            last_hidden_state = outputs[0]
+        elif hasattr(outputs, 'last_hidden_state'):
+            last_hidden_state = outputs.last_hidden_state
+        else:
+            last_hidden_state = outputs[0]
 
+        # Last hidden state: [B, 197, 768]  (1 CLS + 196 patches)
         # CLS token (index 0)
-        cls_tok = hidden[:, 0, :]           # [B, 768]
+        cls_tok = last_hidden_state[:, 0, :]           # [B, 768]
 
         # Patch tokens (indices 1..196)
-        patch_tok = hidden[:, 1:, :]        # [B, 196, 768]
+        patch_tok = last_hidden_state[:, 1:, :]        # [B, 196, 768]
 
         all_patches.append(patch_tok.cpu())
         all_cls.append(cls_tok.cpu())
