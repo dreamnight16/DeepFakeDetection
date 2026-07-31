@@ -31,8 +31,9 @@ EPOCHS=10
 # ── Create patched train.py copy (safe for concurrent runs) ──────────────
 TRAIN_PY="./training/train_video_sweep.py"
 cp ./training/train.py "$TRAIN_PY"
-# Use trainer_v2 (same as other sweeps)
 sed -i "s/^from trainer\..* import Trainer/from trainer.trainer_v2 import Trainer/" "$TRAIN_PY"
+# Use video_dataset wrapper (fixes texture_score_tensors in video_mode)
+sed -i "s/from dataset\.abstract_dataset import DeepfakeAbstractBaseDataset/from dataset.video_dataset import VideoDeepfakeDataset as DeepfakeAbstractBaseDataset/" "$TRAIN_PY"
 trap "rm -f $TRAIN_PY" EXIT
 
 > "$SWEEP_LOG"
