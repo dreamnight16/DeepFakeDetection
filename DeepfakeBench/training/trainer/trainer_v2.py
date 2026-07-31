@@ -964,29 +964,6 @@ class Trainer(object):
                             beta_b=self.config.get('mixup_beta_b', None),
                             beta_flip=self.config.get('mixup_beta_flip', False),
                         )
-                # ── Diffusion Trajectory Mixup experiments ──────────────
-                elif mixup_mode == 'trajectory':
-                    from trainer.trajectory_mixup import trajectory_mixup
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
-                        trajectory_mixup(
-                            data_dict['image'], data_dict['label'],
-                            alpha=alpha, gamma=gamma,
-                            t_min=self.config.get('traj_t_min', 50),
-                            t_max=self.config.get('traj_t_max', 700),
-                            T=self.config.get('traj_T', 1000),
-                        )
-                elif mixup_mode == 'trajectory_pyramid':
-                    from trainer.trajectory_mixup import pyramid_trajectory_mixup
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
-                        pyramid_trajectory_mixup(
-                            data_dict['image'], data_dict['label'],
-                            alpha=alpha, gamma=gamma,
-                            num_levels=self.config.get('lap_num_levels', 3),
-                            t_min=self.config.get('traj_t_min', 50),
-                            t_max=self.config.get('traj_t_max', 700),
-                            T=self.config.get('traj_T', 1000),
-                        )
-                # ──────────────────────────────────────────────────────────
                 else:
                     mixup_k = self.config.get('mixup_k', 1)
                     data_dict = hardest_k_mixup(
