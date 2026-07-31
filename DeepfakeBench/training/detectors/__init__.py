@@ -8,3 +8,4 @@ sys.path.append(project_root_dir)
 
 from utils.registry import DETECTOR
 from .effort_detector import EffortDetector
+from .video_info_detectors import MIDetector, GTDetector, GNNDetector

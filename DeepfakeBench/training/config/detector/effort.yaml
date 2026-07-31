@@ -137,3 +137,24 @@ sampler_real_ratio: 0.30  # real proportion for v1 sampler (0.5=balanced, 0.30=l
 # (no RR/FF — every batch element is an explicit real+fake pair).
 # When false, uses v1 (per-class balanced → randperm creates RR/FF/RF/FR).
 balance_sampler_v2: true
+
+# ── Video Info-Graph Detector settings ────────────────────────────────────
+# Model name: mi_video | gt_video | gnn_video
+clip_model_path: '/home/user1/effort/effort_main/Effort-AIGI-Detection-main/DeepfakeBench/training/models--openai--clip-vit-large-patch14'
+
+# MI-D flags
+mi_temporal: true
+mi_spatial: false
+mi_frequency: false
+
+# GT-D flags
+gt_temporal: true
+gt_spatial: false
+gt_full: false
+
+# GNN-D variant: mlp | gcn | gat | stgcn
+gnn_variant: gcn
+
+# Video clip settings
+video_mode: true
+clip_size: 8
