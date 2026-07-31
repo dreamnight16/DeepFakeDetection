@@ -62,6 +62,7 @@ from tqdm import tqdm
 from collections import defaultdict
 
 # ── scikit-learn ──────────────────────────────────────────────────────────
+import warnings
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -72,6 +73,8 @@ from sklearn.metrics import (
     f1_score,
     average_precision_score,
 )
+warnings.filterwarnings('ignore', category=UserWarning,
+                        message='.*lbfgs failed to converge.*')
 
 # ── PyTorch ───────────────────────────────────────────────────────────────
 import torch
@@ -632,7 +635,7 @@ def evaluate_features(train_feat, train_labels, test_feat, test_labels):
     X_test = scaler.transform(test_feat)
 
     # Grid search over C
-    lr = LogisticRegression(max_iter=2000, solver='lbfgs', random_state=1024)
+    lr = LogisticRegression(max_iter=5000, solver='lbfgs', random_state=1024)
     params = {'C': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]}
     gs = GridSearchCV(lr, params, cv=5, scoring='roc_auc', n_jobs=-1)
     gs.fit(X_train, train_labels)
