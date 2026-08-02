@@ -946,15 +946,16 @@ class Trainer(object):
                             alpha=alpha, gamma=gamma,
                             num_levels=self.config.get('lap_num_levels', 3),
                         )
-                # ── Personal experiments: 2×2 label(0/1) × scope(top/bottom) ─
+                # ── Personal experiments: 2×3 label(0/1) × scope(top/bottom/full) ─
                 elif mixup_mode in (
                     'lap_pyramid_label0_top', 'lap_pyramid_label0_bottom',
                     'lap_pyramid_label1_top', 'lap_pyramid_label1_bottom',
+                    'lap_pyramid_label0_full', 'lap_pyramid_label1_full',
                 ):
                     from trainer.lap_pyramid_label_variants import lap_pyramid_label_mixup
-                    _parts = mixup_mode.split('_')  # lap_pyramid_label{0|1}_{top|bottom}
+                    _parts = mixup_mode.split('_')  # lap_pyramid_label{0|1}_{top|bottom|full}
                     _label = int(_parts[2][-1])     # 'label0' → 0, 'label1' → 1
-                    _scope = _parts[3]              # 'top' or 'bottom'
+                    _scope = _parts[3]              # 'top' | 'bottom' | 'full'
                     data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
                         lap_pyramid_label_mixup(
                             data_dict['image'], data_dict['label'],
