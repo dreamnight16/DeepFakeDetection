@@ -972,6 +972,15 @@ class Trainer(object):
                         selection=self.config.get('mixup_selection', 'hardest'),
                         hf_cutoff=hf_cutoff, ycbcr=use_ycbcr, mix_freq=mix_freq,
                     )
+            # ── Strip RF from loss: keep only RR (ỹ=0) + FF (ỹ=1) ─────────
+            if self.config.get('mixup_loss_strip', False):
+                y_soft = data_dict['label_soft']
+                # RF samples: ỹ ∈ (0, 1), i.e. not exactly 0 or 1
+                keep = (y_soft <= 1e-6) | (y_soft >= 1.0 - 1e-6)  # RR + FF only
+                if keep.sum() > 0:
+                    data_dict['image'] = data_dict['image'][keep]
+                    data_dict['label'] = data_dict['label'][keep]
+                data_dict.pop('label_soft', None)
             # ──────────────────────────────────────────────────────────────
             losses,predictions=self.train_step(data_dict)
 
