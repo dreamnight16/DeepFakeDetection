@@ -1,0 +1,395 @@
+% ===========================================================================
+%  Effort AIGI Detection Framework — Algorithm Pseudocode
+%  Compile with: xelatex
+% ===========================================================================
+
+\documentclass[12pt]{article}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{amsmath,amssymb,bm}
+\usepackage[margin=1.8cm]{geometry}
+
+\floatname{algorithm}{Algorithm}
+
+\begin{document}
+
+% ========================================================================
+\begin{algorithm}[p]
+\caption{Model Architecture: CLIP ViT-L/14 with LoRA Adaptation}
+\label{alg:model}
+\begin{algorithmic}[1]
+\Require
+  Pretrained CLIP ViT-L/14 $\Phi$; target modules $\mathcal{T} = \{\mathbf{W}_q, \mathbf{W}_k, \mathbf{W}_v, \mathbf{W}_o\}$;
+  LoRA ranks $r_{\text{attn}} = 4$, $r_{\text{head}} = 2$;
+  LoRA scales $\alpha_{\text{attn}} = 16$, $\alpha_{\text{head}} = 8$;
+  flag \texttt{full\_train\_head} (True = all head params trainable, False = LoRA head)
+\Ensure
+  Trainable detector $F(\cdot) = g_\phi \circ f_\theta(\cdot)$
+
+\State \textbf{// Step 1: Freeze backbone}
+\For{$\mathbf{W} \in \Phi.\text{parameters}()$}
+  \State $\mathbf{W}.\text{requires\_grad} \gets \text{False}$
+\EndFor
+
+\State \textbf{// Step 2: Inject LoRA into attention projections}
+\For{each module $\mathbf{W} \in \Phi.\text{vision\_model}.\text{modules}()$}
+  \If{$\mathbf{W}$ is Linear $\land$ name$(\mathbf{W}) \in \mathcal{T}$}
+    \State $\mathbf{A} \sim \mathcal{N}(0, 0.02^2) \in \mathbb{R}^{d_{\text{in}} \times r_{\text{attn}}}$
+    \State $\mathbf{B} \gets \mathbf{0} \in \mathbb{R}^{r_{\text{attn}} \times d_{\text{out}}}$
+    \State \textbf{// Copy pretrained weights into new LoRA layer, then replace}
+    \State $\widetilde{\mathbf{W}}.\text{weight} \gets \mathbf{W}.\text{weight}$; \quad $\widetilde{\mathbf{W}}.\text{bias} \gets \mathbf{W}.\text{bias}$
+    \State Replace $\mathbf{W}$ with $\widetilde{\mathbf{W}}(\mathbf{x}) = \mathbf{W}\mathbf{x} + \frac{\alpha_{\text{attn}}}{r_{\text{attn}}} \cdot (\mathbf{x}\mathbf{A})\mathbf{B}$
+    \State $\mathbf{W}.\text{requires\_grad} \gets \text{False}$; \quad $\mathbf{A},\mathbf{B}.\text{requires\_grad} \gets \text{True}$
+  \EndIf
+\EndFor
+
+\State \textbf{// Step 3: Construct classifier head}
+\State $\mathbf{W}_h \sim \text{Kaiming\_uniform} \in \mathbb{R}^{2 \times 1024}$
+\State $\mathbf{b}_h \sim \mathcal{U}(-\text{bound}, \text{bound}) \in \mathbb{R}^{2}$
+\If{\texttt{full\_train\_head}}
+  \State $\mathbf{W}_h.\text{requires\_grad} \gets \text{True}$; \quad $\mathbf{b}_h.\text{requires\_grad} \gets \text{True}$
+  \State $g_\phi(\mathbf{z}) \gets \mathbf{W}_h\mathbf{z} + \mathbf{b}_h$ \Comment{All 2050 params trainable}
+\Else
+  \State $\mathbf{W}_h.\text{requires\_grad} \gets \text{False}$; \quad $\mathbf{b}_h.\text{requires\_grad} \gets \text{False}$
+  \State \textbf{// LoRA factors (trainable):} $\mathbf{A}_h \in \mathbb{R}^{1024 \times r_{\text{head}}}$, $\mathbf{B}_h \in \mathbb{R}^{r_{\text{head}} \times 2}$
+  \State $\mathbf{A}_h \sim \mathcal{N}(0, 0.02^2)$; \quad $\mathbf{B}_h \gets \mathbf{0}$
+  \State $g_\phi(\mathbf{z}) = \underbrace{\mathbf{W}_h\mathbf{z} + \mathbf{b}_h}_{\text{frozen base}} \;+\; \underbrace{\frac{\alpha_{\text{head}}}{r_{\text{head}}} \cdot (\mathbf{z}\mathbf{A}_h)\mathbf{B}_h}_{\text{trainable LoRA}} \in \mathbb{R}^{2}$
+\EndIf
+
+\State \textbf{// Step 4: Full forward pass}
+\State $f_\theta(\mathbf{x}) = \Phi_{\text{LoRA}}(\mathbf{x}).\text{pooler\_output} \in \mathbb{R}^{1024}$ \Comment{ViT output: CLS token after LoRA attention}
+\State $\hat{y} = \operatorname{softmax}(g_\phi(f_\theta(\mathbf{x})))_1$ \Comment{Predicted probability of being fake}
+\State \Return $F(\cdot) = g_\phi \circ f_\theta$
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{BalanceBatchSampler (v1): Class-Balanced Mini-Batch Construction}
+\label{alg:balance}
+\begin{algorithmic}[1]
+\Require
+  Dataset labels $\mathbf{y} \in \{0,1\}^{N}$ (0 = real, 1 = fake);
+  Batch-size control $b \in \mathbb{N}^+$ (total batch $\approx 2b$);
+  Real ratio $\rho \in (0,1)$ (proportion of real samples per batch, default $0.5$);
+  Shuffle flag $s \in \{\text{True}, \text{False}\}$
+\Ensure
+  Sequence of mini-batches $\{\mathcal{B}_t\}_{t=0}^{M-1}$,
+  $|\mathcal{B}_t| = n_r + n_f$ where $n_r/n_f$ follows $\rho$
+
+\State $\mathcal{I}_0 \gets \{i \mid \mathbf{y}[i] = 0\}$; \quad $\mathcal{I}_1 \gets \{i \mid \mathbf{y}[i] = 1\}$
+\State $n_r \gets \max(1, \lfloor 2b \cdot \rho \rceil)$; \quad $n_f \gets 2b - n_r$
+\State $M \gets \min\big(\lfloor |\mathcal{I}_0| \,/\, n_r \rfloor,\; \lfloor |\mathcal{I}_1| \,/\, n_f \rfloor\big)$
+\If{$M = 0$}
+  \State \textbf{raise} ValueError (insufficient samples for $n_r + n_f$)
+\EndIf
+
+\State \textbf{// Step 1: Shuffle indices within each class independently}
+\If{$s$}
+  \State $\mathcal{I}_0 \gets \operatorname{Shuffle}(\mathcal{I}_0)$; \quad $\mathcal{I}_1 \gets \operatorname{Shuffle}(\mathcal{I}_1)$
+\EndIf
+
+\State \textbf{// Step 2: Construct batches}
+\State $\mathbb{B} \gets [\;]$
+\For{$t = 0$ \textbf{to} $M - 1$}
+  \State $\mathcal{B}_t \gets [\;]$
+  \State $\mathcal{B}_t.\text{extend}\big(\mathcal{I}_0[t \cdot n_r : (t+1) \cdot n_r]\big)$ \Comment{$n_r$ reals}
+  \State $\mathcal{B}_t.\text{extend}\big(\mathcal{I}_1[t \cdot n_f : (t+1) \cdot n_f]\big)$ \Comment{$n_f$ fakes}
+  \State $\mathbb{B}.\text{append}(\mathcal{B}_t)$
+\EndFor
+
+\State \textbf{// Step 3: Shuffle batch order}
+\If{$s$}
+  \State $\mathbb{B} \gets \operatorname{Shuffle}(\mathbb{B})$
+\EndIf
+\State \Return $\mathbb{B}$
+
+\vspace{4pt}
+\State \textbf{Key parameter:} $\rho = 0.5$ yields equal real/fake (baseline);
+\State $\rho = 0.7$--$0.85$ yields high-real-image ratios (more RR + RF outputs).
+\State \textbf{Limitation:} single-GPU only (DDP not yet supported).
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{BalancePairSampler (v2): Explicit (Real, Fake) Pair Construction}
+\label{alg:balance_v2}
+\begin{algorithmic}[1]
+\Require
+  Dataset labels $\mathbf{y} \in \{0,1\}^{N}$ (0 = real, 1 = fake);
+  Pairs per batch $P \in \mathbb{N}^+$;
+  Shuffle flag $s \in \{\text{True}, \text{False}\}$
+\Ensure
+  Sequence of interleaved batches $\{\mathcal{B}_t\}_{t=0}^{M-1}$,
+  each $\mathcal{B}_t = [r_1, f_1,\; r_2, f_2,\; \dots,\; r_P, f_P]$ (length $2P$)
+
+\State $\mathcal{I}_0 \gets \{i \mid \mathbf{y}[i] = 0\}$; \quad $\mathcal{I}_1 \gets \{i \mid \mathbf{y}[i] = 1\}$
+\State $M \gets \big\lfloor \min(|\mathcal{I}_0|,\, |\mathcal{I}_1|) \,/\, P \big\rfloor$
+\If{$M = 0$}
+  \State \textbf{raise} ValueError (insufficient samples for $P$ pairs)
+\EndIf
+
+\State \textbf{// Step 1: Shuffle intra-class indices independently}
+\If{$s$}
+  \State $\mathcal{I}_0 \gets \operatorname{Shuffle}(\mathcal{I}_0)$; \quad $\mathcal{I}_1 \gets \operatorname{Shuffle}(\mathcal{I}_1)$
+\EndIf
+
+\State \textbf{// Step 2: Build interleaved batches}
+\State $\mathbb{B} \gets [\;]$
+\For{$t = 0$ \textbf{to} $M - 1$}
+  \State $\mathcal{B}_t \gets [\;]$
+  \For{$p = 0$ \textbf{to} $P - 1$}
+    \State $\mathcal{B}_t.\text{append}\big(\mathcal{I}_0[t \cdot P + p]\big)$ \Comment{real}
+    \State $\mathcal{B}_t.\text{append}\big(\mathcal{I}_1[t \cdot P + p]\big)$ \Comment{fake}
+  \EndFor
+  \State $\mathbb{B}.\text{append}(\mathcal{B}_t)$
+\EndFor
+
+\State \textbf{// Step 3: Shuffle batch order}
+\If{$s$}
+  \State $\mathbb{B} \gets \operatorname{Shuffle}(\mathbb{B})$
+\EndIf
+\State \Return $\mathbb{B}$
+
+\vspace{4pt}
+\State \textbf{Key property:} Every batch element is an explicit (real, fake) pair.
+\State When used with \textsc{RFPairLapPyramidMixup} (Alg.~\ref{alg:rf_lap}),
+\State only RF-mixed outputs are produced — no RR, FF, or FR waste.
+\State \textbf{Limitation:} single-GPU only (DDP not yet supported).
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{LapPyramidMixup \quad (\texttt{mixup\_mode = lap\_pyramid}, with v1 sampler)}
+\label{alg:lap}
+\begin{algorithmic}[1]\scriptsize
+\Require
+  Batch $\{(\mathbf{x}_i, y_i)\}_{i=1}^{B}$ with $\mathbf{x}_i \in \mathbb{R}^{C \times H \times W}$, $y_i \in \{0,1\}$ ($0$ = real, $1$ = fake);
+  $\alpha > 0$ (Beta shape, default $5$); $\gamma \ge 1$ (asymmetry exponent, default $1$);
+  $K \in \mathbb{N}^+$ (pyramid levels, default $3$);
+  $\bm{\omega} \in \mathbb{R}^{K}$ (level weights, default $\omega_k = (K - k)\,/\,\sum_j (K - j)$);
+  $\varepsilon = 10^{-8}$ (numerical stability)
+\Ensure
+  Mixed batch $\{(\tilde{\mathbf{x}}_i, \tilde{y}_i, y^{\text{hard}}_i)\}_{i=1}^{B}$ where
+  $\tilde{\mathbf{x}}_i \in \mathbb{R}^{C \times H \times W}$, $\tilde{y}_i \in [0,1]$, $y^{\text{hard}}_i \in \{0,1\}$
+
+\State $\lambda \sim \operatorname{Beta}(\alpha, \alpha)$; \quad $q \gets 1 - \lambda$ \Comment{Fake residual injection strength}
+\State $\pi \gets \operatorname{RandPerm}(\{1,\dots,B\})$
+
+\State \textbf{// Step 1: Classify pair types (Q1 anchor rule: real always structural anchor)}
+\State $\mathcal{RR} \gets \{i \mid y_i = 0 \land y_{\pi(i)} = 0\}$; \quad $n_{rr} \gets |\mathcal{RR}|$
+\State $\mathcal{FF} \gets \{i \mid y_i = 1 \land y_{\pi(i)} = 1\}$; \quad $n_{ff} \gets |\mathcal{FF}|$
+\State $\mathbf{r} \gets$ real anchor positions in cross-class pairs (merge FR into RF by swapping)
+\State $\mathbf{f} \gets$ corresponding fake partner positions
+\State $n_{rf} \gets |\mathbf{r}|$
+
+\State \textbf{// Step 2: RR — pixel-space mixup, hard label 0}
+\State $\tilde{\mathbf{X}}_{rr} \gets \lambda \cdot \mathbf{X}[\mathcal{RR}] + (1-\lambda) \cdot \mathbf{X}[\pi(\mathcal{RR})]$
+\State $\tilde{\mathbf{y}}_{rr} \gets \mathbf{0}^{n_{rr}}$
+
+\State \textbf{// Step 3: FF — pixel-space mixup, hard label 1}
+\State $\tilde{\mathbf{X}}_{ff} \gets \lambda \cdot \mathbf{X}[\mathcal{FF}] + (1-\lambda) \cdot \mathbf{X}[\pi(\mathcal{FF})]$
+\State $\tilde{\mathbf{y}}_{ff} \gets \mathbf{1}^{n_{ff}}$
+
+\State \textbf{// Step 4: RF — Laplacian pyramid residual mixup}
+\If{$n_{rf} > 0$}
+  \State $\mathbf{X}_r \gets \mathbf{X}[\mathbf{r}]$; \quad $\mathbf{X}_f \gets \mathbf{X}[\mathbf{f}]$ \Comment{Anchors, partners}
+
+  \For{$i = 1$ \textbf{to} $n_{rf}$} \Comment{Element-wise pairs $(\mathbf{r}[i], \mathbf{f}[i])$}
+    \State $\mathbf{x}_r \gets \mathbf{X}_r[i]$; \quad $\mathbf{x}_f \gets \mathbf{X}_f[i]$
+    \State \textbf{// (a) Build Gaussian pyramids (5-tap binomial [1,4,6,4,1]/16, separable, then $\downarrow\!2$)}
+    \State $\mathbf{G}_0^r \gets \mathbf{x}_r$; \quad $\mathbf{G}_0^f \gets \mathbf{x}_f$
+    \For{$\ell = 0$ \textbf{to} $K - 1$}
+      \State $\mathbf{G}_{\ell+1} \gets \operatorname{PyrDown}(\mathbf{G}_\ell)$
+    \EndFor
+
+    \State \textbf{// (b) Build Laplacian pyramids:} $\mathbf{L}_\ell = \mathbf{G}_\ell - \operatorname{PyrUp}(\mathbf{G}_{\ell+1})$
+    \State \textbf{//} (PyrUp = bilinear upsampling $\uparrow\!2$, \texttt{F.interpolate(mode='bilinear')})
+    \For{$\ell = 0$ \textbf{to} $K - 1$}
+      \State $\mathbf{L}_\ell^{\,r} \gets \mathbf{G}_\ell^{\,r} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,r})$
+      \State $\mathbf{L}_\ell^{\,f} \gets \mathbf{G}_\ell^{\,f} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,f})$
+    \EndFor
+
+    \State \textbf{// (c) Mix Laplacian residuals level-by-level}
+    \For{$\ell = 0$ \textbf{to} $K - 1$}
+      \State $\mathbf{L}_\ell^{\text{mix}} \gets (1 - q) \cdot \mathbf{L}_\ell^{\,r} + q \cdot \mathbf{L}_\ell^{\,f}$
+      \State $E_\ell^{\,r} \gets \|\mathbf{L}_\ell^{\,r}\|_F^2$; \quad $E_\ell^{\,f} \gets \|\mathbf{L}_\ell^{\,f}\|_F^2$
+    \EndFor
+
+    \State \textbf{// (d) Fake evidence from residual energy ratio}
+    \State $\text{num} \gets q^2 \sum_{\ell=0}^{K-1} \omega_\ell \cdot E_\ell^{\,f}$
+    \State $\text{den} \gets \sum_{\ell=0}^{K-1} \omega_\ell\big[(1-q)^2 \cdot E_\ell^{\,r} + q^2 \cdot E_\ell^{\,f}\big] + \varepsilon$
+    \State $e_f \gets \text{num} \,/\, \text{den}$
+
+    \State \textbf{// (e) Reconstruct: coarse structure from real + mixed residuals}
+    \State $\tilde{\mathbf{x}} \gets \mathbf{G}_K^{\,r}$ \Comment{Coarsest Gaussian of real anchor}
+    \For{$\ell = K-1$ \textbf{downto} $0$}
+      \State $\tilde{\mathbf{x}} \gets \operatorname{PyrUp}(\tilde{\mathbf{x}}) + \mathbf{L}_\ell^{\text{mix}}$
+    \EndFor
+    \State $\tilde{\mathbf{x}} \gets \operatorname{clamp}(\tilde{\mathbf{x}},\; \min(\mathbf{x}_r),\; \max(\mathbf{x}_r))$
+
+    \State \textbf{// (f) Energy-grounded soft label (Aggressively Fake)}
+    \State $\tilde{y} \gets 1 - (1 - e_f)^{\gamma}$
+  \EndFor
+\EndIf
+
+\State \textbf{// Step 5: Assemble final batch}
+\State $\tilde{\mathbf{X}} \gets \operatorname{Concat}(\tilde{\mathbf{X}}_{rr},\, \tilde{\mathbf{X}}_{ff},\, \tilde{\mathbf{X}}_{rf})$
+\State $\tilde{\mathbf{y}} \gets \operatorname{Concat}(\tilde{\mathbf{y}}_{rr},\, \tilde{\mathbf{y}}_{ff},\, \tilde{\mathbf{y}}_{rf})$
+\State $\mathbf{y}^{\text{hard}} \gets \operatorname{Concat}(\mathbf{0}^{n_{rr}},\, \mathbf{1}^{n_{ff}},\, \mathbf{0}^{n_{rf}})$
+
+\State \Return $\{(\tilde{\mathbf{x}}_i, \tilde{y}_i, y^{\text{hard}}_i)\}$
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{RFPairLapPyramidMixup \quad (v2 sampler, RF-only)}
+\label{alg:rf_lap}
+\begin{algorithmic}[1]\scriptsize
+\Require
+  Interleaved batch $\{(\mathbf{x}_i, y_i)\}_{i=1}^{2N}$ from \textsc{BalancePairSampler}
+  with pairs $(r_k, f_k)_{k=1}^{N}$;
+  $\alpha > 0$; $\gamma \ge 1$; $K \in \mathbb{N}^+$; $\bm{\omega}$; $\varepsilon$ (same as Alg.~\ref{alg:lap})
+\Ensure
+  Mixed batch $\{(\tilde{\mathbf{x}}_k, \tilde{y}_k, y^{\text{hard}}_k)\}_{k=1}^{N}$ (N outputs from 2N inputs)
+
+\State $\lambda \sim \operatorname{Beta}(\alpha, \alpha)$; \quad $q \gets 1 - \lambda$
+\State $\mathbf{X}_r \gets \mathbf{X}[0::2]$ \Comment{Real anchors \quad $[N, C, H, W]$}
+\State $\mathbf{X}_f \gets \mathbf{X}[1::2]$ \Comment{Fake partners \quad $[N, C, H, W]$}
+
+\State \textbf{// No pair-type classification needed — every pair is (real, fake)}
+
+\State \textbf{// Gaussian pyramids (batch-parallel)}
+\State $\mathbf{G}_0^r \gets \mathbf{X}_r$; \quad $\mathbf{G}_0^f \gets \mathbf{X}_f$
+\For{$\ell = 0$ \textbf{to} $K - 1$}
+  \State $\mathbf{G}_{\ell+1}^r \gets \operatorname{PyrDown}(\mathbf{G}_\ell^r)$
+  \State $\mathbf{G}_{\ell+1}^f \gets \operatorname{PyrDown}(\mathbf{G}_\ell^f)$
+\EndFor
+
+\State \textbf{// Laplacian pyramids}
+\For{$\ell = 0$ \textbf{to} $K - 1$}
+  \State $\mathbf{L}_\ell^{\,r} \gets \mathbf{G}_\ell^{\,r} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,r})$
+  \State $\mathbf{L}_\ell^{\,f} \gets \mathbf{G}_\ell^{\,f} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,f})$
+\EndFor
+
+\State \textbf{// Mix Laplacian residuals level-by-level}
+\For{$\ell = 0$ \textbf{to} $K - 1$}
+  \State $\mathbf{L}_\ell^{\text{mix}} \gets (1 - q) \cdot \mathbf{L}_\ell^{\,r} + q \cdot \mathbf{L}_\ell^{\,f}$
+  \State $E_\ell^{\,r} \gets$ per-sample $\|\mathbf{L}_\ell^{\,r}\|_F^2 \in \mathbb{R}^{N}$; \quad
+        $E_\ell^{\,f} \gets$ per-sample $\|\mathbf{L}_\ell^{\,f}\|_F^2 \in \mathbb{R}^{N}$
+\EndFor
+
+\State \textbf{// Fake evidence (per-sample energy ratio)}
+\State $\text{num} \gets q^2 \sum_{\ell=0}^{K-1} \omega_\ell \cdot E_\ell^{\,f}$
+\State $\text{den} \gets \sum_{\ell=0}^{K-1} \omega_\ell\big[(1-q)^2 \cdot E_\ell^{\,r} + q^2 \cdot E_\ell^{\,f}\big] + \varepsilon$
+\State $\mathbf{e}_f \gets \text{num} \,/\, \text{den} \in \mathbb{R}^{N}$
+
+\State \textbf{// Reconstruct from coarse real + mixed residuals}
+\State $\tilde{\mathbf{X}} \gets \mathbf{G}_K^{\,r}$ \Comment{Start from real's coarsest Gaussian}
+\For{$\ell = K-1$ \textbf{downto} $0$}
+  \State $\tilde{\mathbf{X}} \gets \operatorname{PyrUp}(\tilde{\mathbf{X}}) + \mathbf{L}_\ell^{\text{mix}}$
+\EndFor
+\State $\tilde{\mathbf{X}} \gets \operatorname{clamp}(\tilde{\mathbf{X}},\; \min(\mathbf{X}_r),\; \max(\mathbf{X}_r))$ \Comment{Per-sample clamping}
+
+\State \textbf{// Soft label (all real anchors)}
+\State $\tilde{\mathbf{y}} \gets 1 - (1 - \mathbf{e}_f)^{\gamma} \in [0,1]^{N}$
+\State $\mathbf{y}^{\text{hard}} \gets \mathbf{0}^{N}$ \Comment{All anchors are real}
+
+\State \Return $\{(\tilde{\mathbf{x}}_k, \tilde{y}_k, 0)\}_{k=1}^{N}$
+
+\vspace{4pt}
+\State \textbf{Key difference from Alg.~\ref{alg:lap}:} No RR/FF/FR pairs — every output is
+\State an RF-mixed image. Batch size halves from $2N$ (loaded) to $N$ (mixed).
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{Loss Computation}
+\label{alg:loss}
+\begin{algorithmic}[1]
+\Require
+  Logits $\mathbf{P} \in \mathbb{R}^{B \times 2}$;
+  Soft labels $\tilde{\mathbf{y}} \in [0,1]^{B}$ (if mixup active) or hard labels $\mathbf{y} \in \{0,1\}^{B}$
+\Ensure
+  Loss dict $\{\text{overall}, \text{real\_loss}, \text{fake\_loss}\}$
+
+\State \textbf{// Primary loss: soft-label or hard-label cross-entropy}
+\If{$\tilde{\mathbf{y}}$ is provided (mixup active)}
+  \State $\mathbf{L}_{\text{ce}} \gets -\big[\tilde{\mathbf{y}} \cdot \log\operatorname{softmax}(\mathbf{P})_1 + (1 - \tilde{\mathbf{y}}) \cdot \log\operatorname{softmax}(\mathbf{P})_0\big]$
+  \State $\mathcal{L}_{\text{overall}} \gets \frac{1}{B}\sum_{i=1}^{B} L_{\text{ce},i}$
+
+  \State \textbf{// Per-class decomposition via soft-label weighting}
+  \State $w_{\text{real}} \gets \sum_i (1 - \tilde{y}_i)$; \quad
+        $w_{\text{fake}} \gets \sum_i \tilde{y}_i$
+  \State $\mathcal{L}_{\text{real}} \gets \frac{1}{\max(w_{\text{real}}, 1)} \sum_i (1 - \tilde{y}_i) \cdot L_{\text{ce},i}$
+  \State $\mathcal{L}_{\text{fake}} \gets \frac{1}{\max(w_{\text{fake}}, 1)} \sum_i \tilde{y}_i \cdot L_{\text{ce},i}$
+\Else
+  \State $\mathbf{L}_{\text{ce}} \gets \operatorname{CrossEntropy}(\mathbf{P}, \mathbf{y})$
+  \State $\mathcal{L}_{\text{overall}} \gets \frac{1}{B}\sum_{i=1}^{B} L_{\text{ce},i}$
+
+  \State \textbf{// Per-class decomposition via hard labels}
+  \State $\mathcal{L}_{\text{real}} \gets \frac{1}{|\{i:y_i=0\}|} \sum_{i: y_i=0} \operatorname{CE}(\mathbf{P}_i, y_i)$
+  \State $\mathcal{L}_{\text{fake}} \gets \frac{1}{|\{i:y_i=1\}|} \sum_{i: y_i=1} \operatorname{CE}(\mathbf{P}_i, y_i)$
+\EndIf
+
+\State \Return $\{\text{overall}: \mathcal{L}_{\text{overall}},\;
+                  \text{real\_loss}: \mathcal{L}_{\text{real}},\;
+                  \text{fake\_loss}: \mathcal{L}_{\text{fake}}\}$
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{Training Loop (per epoch)}
+\label{alg:train}
+\begin{algorithmic}[1]
+\Require
+  Training set $\mathcal{D}_{\text{train}}$; validation sets $\{\mathcal{D}_{\text{val}}^k\}$;
+  model $F = g_\phi \circ f_\theta$; optimizer $\mathcal{O}$;
+  mixup config $\mathcal{M}$; sampler config $\mathcal{S}$; $E$ epochs; eval interval $T$ (steps)
+\Ensure
+  Best model checkpoint by primary metric (AUC)
+
+\For{$\text{epoch} = 1$ \textbf{to} $E$}
+  \For{each batch $\mathcal{B} = \{(\mathbf{x}_i, y_i)\} \subset \mathcal{D}_{\text{train}}$}
+
+    \State \textbf{// Step 1: On-the-fly mixup augmentation (training only)}
+    \If{$\mathcal{M}.\text{use\_mixup}$}
+      \If{$\mathcal{S}.\text{v2}$ (BalancePairSampler)}
+        \State $\{(\tilde{\mathbf{x}}_k, \tilde{y}_k, 0)\} \gets \textsc{RFPairLapPyramidMixup}(\mathcal{B})$ \Comment{Alg.~\ref{alg:rf_lap}}
+      \Else
+        \State $\{(\tilde{\mathbf{x}}_i, \tilde{y}_i, y^{\text{hard}}_i)\} \gets \textsc{LapPyramidMixup}(\mathcal{B})$ \Comment{Alg.~\ref{alg:lap}}
+      \EndIf
+    \EndIf
+
+    \State \textbf{// Step 2: Forward pass}
+    \State $\mathbf{Z} \gets f_\theta(\tilde{\mathbf{X}})$; \quad $\mathbf{P} \gets g_\phi(\mathbf{Z})$
+
+    \State \textbf{// Step 3: Loss computation (Alg.~\ref{alg:loss})}
+    \State $\mathbf{L} \gets \textsc{LossComputation}(\mathbf{P}, \tilde{\mathbf{y}})$
+
+    \State \textbf{// Step 4: Standard backward pass}
+    \State $\mathcal{O}.\text{zero\_grad}()$
+    \State $\mathbf{L}.\text{overall}.\text{backward}()$
+    \State $\mathcal{O}.\text{step}()$
+
+    \State \textbf{// Step 5: Periodic evaluation}
+    \If{$\text{global\_step} \bmod T = 0$}
+      \For{each $\mathcal{D}_{\text{val}}^k$}
+        \State $\text{metrics}_k \gets \textsc{Evaluate}(F, \mathcal{D}_{\text{val}}^k)$ \Comment{No mixup; $\hat{y}_i = \operatorname{softmax}(F(\mathbf{x}_i))_1$ vs. $y_i$}
+        \State Update best ckpt if AUC improves
+      \EndFor
+    \EndIf
+    \State $\text{global\_step} \gets \text{global\_step} + 1$
+
+  \EndFor
+\EndFor
+\State \Return best checkpoint
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}

@@ -388,7 +388,8 @@ def main():
     parser.add_argument('--train_dataset', type=str, default='FaceForensics++')
     parser.add_argument('--val_dataset', type=str, default='Celeb-DF-v2')
     parser.add_argument('--test_datasets', nargs='+',
-                        default=['Celeb-DF-v2', 'DFDC', 'DFDCP', 'DeepFakeDetection'])
+                        default=['WDF', 'FFIW', 'Celeb-DF-v2', 'DeepFakeDetection',
+                                 'DFDC', 'DFDCP', 'DeeperForensics-1.0'])
     parser.add_argument('--output_dir', type=str, default='./experiment_results')
     parser.add_argument('--alpha', type=float, default=5.0)
     parser.add_argument('--gamma', type=float, default=1.0)

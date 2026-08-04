@@ -46,7 +46,7 @@ COMMON_ARGS=(
     --pyramid_mode "${PYRAMID_MODE}"
     --train_dataset "FaceForensics++"
     --val_dataset "Celeb-DF-v2"
-    --test_datasets "Celeb-DF-v2" "DFDC" "DFDCP" "DeepFakeDetection"
+    --test_datasets "WDF" "FFIW" "Celeb-DF-v2" "DeepFakeDetection" "DFDC" "DFDCP" "DeeperForensics-1.0"
     --output_dir "${OUTPUT_DIR}"
     --alpha 5.0
     --gamma 1.0

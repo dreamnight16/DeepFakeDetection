@@ -1,0 +1,405 @@
+% ===========================================================================
+%  Effort AIGI Detection Framework — 算法伪代码（中文版）
+%  编译: xelatex
+% ===========================================================================
+
+\documentclass[12pt]{article}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{amsmath,amssymb,bm}
+\usepackage[margin=1.8cm]{geometry}
+\usepackage{xeCJK}
+\setCJKmainfont{SimSun}[BoldFont=SimHei]
+\setCJKmonofont{SimHei}
+\setCJKsansfont{SimHei}
+
+\floatname{algorithm}{算法}
+\renewcommand{\algorithmicrequire}{\textbf{输入:}}
+\renewcommand{\algorithmicensure}{\textbf{输出:}}
+
+\begin{document}
+
+% ============================================================================
+%  Part I: Training Framework（训练框架）
+% ============================================================================
+
+% --------------------------------------------------------------------------
+\begin{algorithm}[p]
+\caption{训练主循环（每 epoch）}
+\label{alg:train}
+\begin{algorithmic}[1]\footnotesize
+\Require
+  训练集 $\mathcal{D}_{\text{train}}$；验证集 $\{\mathcal{D}_{\text{val}}^k\}$；
+  模型 $F = g_\phi \circ f_\theta$；优化器 $\mathcal{O}$；
+  Mixup 配置 $\mathcal{M}$；采样器配置 $\mathcal{S}$；$E$ 轮；评估间隔 $T$（步数）
+\Ensure
+  按主指标（AUC）选出的最佳模型检查点
+
+\For{$\text{epoch} = 1$ \textbf{to} $E$}
+  \For{each batch $\mathcal{B} = \{(\mathbf{x}_i, y_i)\} \subset \mathcal{D}_{\text{train}}$}
+
+    \State \textbf{// 步骤 1：在线 Mixup 增强（仅训练时执行）}
+    \If{$\mathcal{M}.\text{use\_mixup}$}
+      \If{$\mathcal{S}.\text{v2}$（BalancePairSampler）}
+        \State $\{(\tilde{\mathbf{x}}_k, \tilde{y}_k, 0)\} \gets \textsc{RFPairLapPyramidMixup}(\mathcal{B})$ \Comment{算法\,\ref{alg:rf_lap}}
+      \Else
+        \State $\{(\tilde{\mathbf{x}}_i, \tilde{y}_i, y^{\text{hard}}_i)\} \gets \textsc{LapPyramidMixup}(\mathcal{B})$ \Comment{算法\,\ref{alg:lap}}
+      \EndIf
+    \EndIf
+
+    \State \textbf{// 步骤 2：前向传播}
+    \State $\mathbf{Z} \gets f_\theta(\tilde{\mathbf{X}})$；\quad $\mathbf{P} \gets g_\phi(\mathbf{Z})$
+
+    \State \textbf{// 步骤 3：损失计算（算法\,\ref{alg:loss}）}
+    \State $\mathbf{L} \gets \textsc{LossComputation}(\mathbf{P}, \tilde{\mathbf{y}})$
+
+    \State \textbf{// 步骤 4：标准反向传播}
+    \State $\mathcal{O}.\text{zero\_grad}()$
+    \State $\mathbf{L}.\text{overall}.\text{backward}()$
+    \State $\mathcal{O}.\text{step}()$
+
+    \State \textbf{// 步骤 5：定期评估}
+    \If{$\text{global\_step} \bmod T = 0$}
+      \For{each $\mathcal{D}_{\text{val}}^k$}
+        \State $\text{metrics}_k \gets \textsc{Evaluate}(F, \mathcal{D}_{\text{val}}^k)$
+        \State 若 AUC 提升则更新最佳检查点
+      \EndFor
+    \EndIf
+    \State $\text{global\_step} \gets \text{global\_step} + 1$
+
+  \EndFor
+\EndFor
+\State \Return 最佳检查点
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{模型架构：CLIP ViT-L/14 + LoRA 适配}
+\label{alg:model}
+\begin{algorithmic}[1]
+\Require
+  预训练 CLIP ViT-L/14 $\Phi$；目标模块 $\mathcal{T} = \{\mathbf{W}_q, \mathbf{W}_k, \mathbf{W}_v, \mathbf{W}_o\}$；
+  LoRA 秩 $r_{\text{attn}} = 4$，$r_{\text{head}} = 2$；
+  LoRA 缩放因子 $\alpha_{\text{attn}} = 16$，$\alpha_{\text{head}} = 8$；
+  标志 \texttt{full\_train\_head}（True = 全量训练分类头，False = LoRA 头）
+\Ensure
+  可训练检测器 $F(\cdot) = g_\phi \circ f_\theta(\cdot)$
+
+\State \textbf{// 步骤 1：冻结骨干网络全部参数}
+\For{$\mathbf{W} \in \Phi.\text{parameters}()$}
+  \State $\mathbf{W}.\text{requires\_grad} \gets \text{False}$
+\EndFor
+
+\State \textbf{// 步骤 2：向注意力投影矩阵注入 LoRA}
+\For{each module $\mathbf{W} \in \Phi.\text{vision\_model}.\text{modules}()$}
+  \If{$\mathbf{W}$ 是 Linear 层 $\land$ name$(\mathbf{W}) \in \mathcal{T}$}
+    \State $\mathbf{A} \sim \mathcal{N}(0, 0.02^2) \in \mathbb{R}^{d_{\text{in}} \times r_{\text{attn}}}$
+    \State $\mathbf{B} \gets \mathbf{0} \in \mathbb{R}^{r_{\text{attn}} \times d_{\text{out}}}$
+    \State \textbf{// 将预训练权重拷贝至新 LoRA 层，再替换}
+    \State $\widetilde{\mathbf{W}}.\text{weight} \gets \mathbf{W}.\text{weight}$；\quad $\widetilde{\mathbf{W}}.\text{bias} \gets \mathbf{W}.\text{bias}$
+    \State 替换 $\mathbf{W}$ 为 $\widetilde{\mathbf{W}}(\mathbf{x}) = \mathbf{W}\mathbf{x} + \frac{\alpha_{\text{attn}}}{r_{\text{attn}}} \cdot (\mathbf{x}\mathbf{A})\mathbf{B}$
+    \State $\mathbf{W}.\text{requires\_grad} \gets \text{False}$；\quad $\mathbf{A},\mathbf{B}.\text{requires\_grad} \gets \text{True}$
+  \EndIf
+\EndFor
+
+\State \textbf{// 步骤 3：构造分类头}
+\State $\mathbf{W}_h \sim \text{Kaiming\_uniform} \in \mathbb{R}^{2 \times 1024}$
+\State $\mathbf{b}_h \sim \mathcal{U}(-\text{bound}, \text{bound}) \in \mathbb{R}^{2}$
+\If{\texttt{full\_train\_head}}
+  \State $\mathbf{W}_h.\text{requires\_grad} \gets \text{True}$；\quad $\mathbf{b}_h.\text{requires\_grad} \gets \text{True}$
+  \State $g_\phi(\mathbf{z}) \gets \mathbf{W}_h\mathbf{z} + \mathbf{b}_h$ \Comment{全部 2050 参数可训练}
+\Else
+  \State $\mathbf{W}_h.\text{requires\_grad} \gets \text{False}$；\quad $\mathbf{b}_h.\text{requires\_grad} \gets \text{False}$
+  \State \textbf{// LoRA 因子（可训练）：} $\mathbf{A}_h \in \mathbb{R}^{1024 \times r_{\text{head}}}$，$\mathbf{B}_h \in \mathbb{R}^{r_{\text{head}} \times 2}$
+  \State $\mathbf{A}_h \sim \mathcal{N}(0, 0.02^2)$；\quad $\mathbf{B}_h \gets \mathbf{0}$
+  \State \textbf{// 分类头前向：} $g_\phi(\mathbf{z}) = \underbrace{\mathbf{W}_h\mathbf{z} + \mathbf{b}_h}_{\text{冻结基座}} \;+\; \underbrace{\frac{\alpha_{\text{head}}}{r_{\text{head}}} \cdot (\mathbf{z}\mathbf{A}_h)\mathbf{B}_h}_{\text{可训练 LoRA}} \in \mathbb{R}^{2}$
+\EndIf
+
+\State \textbf{// 步骤 4：完整前向传播}
+\State $f_\theta(\mathbf{x}) = \Phi_{\text{LoRA}}(\mathbf{x}).\text{pooler\_output} \in \mathbb{R}^{1024}$ \Comment{ViT 输出：经 LoRA 注意力后的 CLS token}
+\State $\hat{y} = \operatorname{softmax}(g_\phi(f_\theta(\mathbf{x})))_1$ \Comment{预测为假图的概率}
+\State \Return $F(\cdot) = g_\phi \circ f_\theta$
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{损失计算}
+\label{alg:loss}
+\begin{algorithmic}[1]
+\Require
+  Logits $\mathbf{P} \in \mathbb{R}^{B \times 2}$；
+  软标签 $\tilde{\mathbf{y}} \in [0,1]^{B}$（Mixup 激活时提供）或硬标签 $\mathbf{y} \in \{0,1\}^{B}$
+\Ensure
+  损失字典 $\{\text{overall}, \text{real\_loss}, \text{fake\_loss}\}$
+
+\State \textbf{// 主损失：软标签或硬标签交叉熵}
+\If{提供了 $\tilde{\mathbf{y}}$（Mixup 激活）}
+  \State $\mathbf{L}_{\text{ce}} \gets -\big[\tilde{\mathbf{y}} \cdot \log\operatorname{softmax}(\mathbf{P})_1 + (1 - \tilde{\mathbf{y}}) \cdot \log\operatorname{softmax}(\mathbf{P})_0\big]$
+  \State $\mathcal{L}_{\text{overall}} \gets \frac{1}{B}\sum_{i=1}^{B} L_{\text{ce},i}$
+
+  \State \textbf{// 按软标签加权分解（用于日志与监控）}
+  \State $w_{\text{real}} \gets \sum_i (1 - \tilde{y}_i)$；\quad
+        $w_{\text{fake}} \gets \sum_i \tilde{y}_i$
+  \State $\mathcal{L}_{\text{real}} \gets \frac{1}{\max(w_{\text{real}}, 1)} \sum_i (1 - \tilde{y}_i) \cdot L_{\text{ce},i}$
+  \State $\mathcal{L}_{\text{fake}} \gets \frac{1}{\max(w_{\text{fake}}, 1)} \sum_i \tilde{y}_i \cdot L_{\text{ce},i}$
+\Else
+  \State $\mathbf{L}_{\text{ce}} \gets \operatorname{CrossEntropy}(\mathbf{P}, \mathbf{y})$
+  \State $\mathcal{L}_{\text{overall}} \gets \frac{1}{B}\sum_{i=1}^{B} L_{\text{ce},i}$
+
+  \State \textbf{// 按硬标签类别分解}
+  \State $\mathcal{L}_{\text{real}} \gets \frac{1}{|\{i:y_i=0\}|} \sum_{i: y_i=0} \operatorname{CE}(\mathbf{P}_i, y_i)$
+  \State $\mathcal{L}_{\text{fake}} \gets \frac{1}{|\{i:y_i=1\}|} \sum_{i: y_i=1} \operatorname{CE}(\mathbf{P}_i, y_i)$
+\EndIf
+
+\State \Return $\{\text{overall}: \mathcal{L}_{\text{overall}},\;
+                  \text{real\_loss}: \mathcal{L}_{\text{real}},\;
+                  \text{fake\_loss}: \mathcal{L}_{\text{fake}}\}$
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{BalanceBatchSampler（v1）：可控真假比例的小批次构造}
+\label{alg:balance}
+\begin{algorithmic}[1]
+\Require
+  数据集标签 $\mathbf{y} \in \{0,1\}^{N}$（0 = 真，1 = 假）；
+  批次控制参数 $b \in \mathbb{N}^+$（批次总大小 $\approx 2b$）；
+  真图比例 $\rho \in (0,1)$（每批中真图占比，默认 $0.5$）；
+  打乱标志 $s \in \{\text{True}, \text{False}\}$
+\Ensure
+  小批次序列 $\{\mathcal{B}_t\}_{t=0}^{M-1}$，
+  $|\mathcal{B}_t| = n_r + n_f$，其中 $n_r/n_f$ 服从 $\rho$
+
+\State $\mathcal{I}_0 \gets \{i \mid \mathbf{y}[i] = 0\}$；\quad $\mathcal{I}_1 \gets \{i \mid \mathbf{y}[i] = 1\}$
+\State $n_r \gets \max(1, \lfloor 2b \cdot \rho \rceil)$；\quad $n_f \gets 2b - n_r$
+\State $M \gets \min\big(\lfloor |\mathcal{I}_0| \,/\, n_r \rfloor,\; \lfloor |\mathcal{I}_1| \,/\, n_f \rfloor\big)$
+\If{$M = 0$}
+  \State \textbf{raise} ValueError（样本数不足 $n_r + n_f$）
+\EndIf
+
+\State \textbf{// 步骤 1：各类内部独立打乱}
+\If{$s$}
+  \State $\mathcal{I}_0 \gets \operatorname{Shuffle}(\mathcal{I}_0)$；\quad $\mathcal{I}_1 \gets \operatorname{Shuffle}(\mathcal{I}_1)$
+\EndIf
+
+\State \textbf{// 步骤 2：轮询构造批次}
+\State $\mathbb{B} \gets [\;]$
+\For{$t = 0$ \textbf{to} $M - 1$}
+  \State $\mathcal{B}_t \gets [\;]$
+  \State $\mathcal{B}_t.\text{extend}\big(\mathcal{I}_0[t \cdot n_r : (t+1) \cdot n_r]\big)$ \Comment{$n_r$ 张真图}
+  \State $\mathcal{B}_t.\text{extend}\big(\mathcal{I}_1[t \cdot n_f : (t+1) \cdot n_f]\big)$ \Comment{$n_f$ 张假图}
+  \State $\mathbb{B}.\text{append}(\mathcal{B}_t)$
+\EndFor
+
+\State \textbf{// 步骤 3：打乱批次顺序}
+\If{$s$}
+  \State $\mathbb{B} \gets \operatorname{Shuffle}(\mathbb{B})$
+\EndIf
+\State \Return $\mathbb{B}$
+
+\vspace{4pt}
+\State \textbf{关键参数：}$\rho = 0.5$ 为等量基线；$\rho = 0.7\sim0.85$ 为高真图比例。
+\State \textbf{限制：}当前仅支持单 GPU 训练（DDP 未适配）。
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{BalancePairSampler（v2）：显式（真图，假图）配对构造}
+\label{alg:balance_v2}
+\begin{algorithmic}[1]
+\Require
+  数据集标签 $\mathbf{y} \in \{0,1\}^{N}$（0 = 真，1 = 假）；
+  每批配对数 $P \in \mathbb{N}^+$；
+  打乱标志 $s \in \{\text{True}, \text{False}\}$
+\Ensure
+  交替配对批次序列 $\{\mathcal{B}_t\}_{t=0}^{M-1}$，
+  每个 $\mathcal{B}_t = [r_1, f_1,\; r_2, f_2,\; \dots,\; r_P, f_P]$（长度 $2P$）
+
+\State $\mathcal{I}_0 \gets \{i \mid \mathbf{y}[i] = 0\}$；\quad $\mathcal{I}_1 \gets \{i \mid \mathbf{y}[i] = 1\}$
+\State $M \gets \big\lfloor \min(|\mathcal{I}_0|,\, |\mathcal{I}_1|) \,/\, P \big\rfloor$
+\If{$M = 0$}
+  \State \textbf{raise} ValueError（样本数不足 $P$ 对）
+\EndIf
+
+\State \textbf{// 步骤 1：各类内部独立打乱}
+\If{$s$}
+  \State $\mathcal{I}_0 \gets \operatorname{Shuffle}(\mathcal{I}_0)$；\quad $\mathcal{I}_1 \gets \operatorname{Shuffle}(\mathcal{I}_1)$
+\EndIf
+
+\State \textbf{// 步骤 2：构造交替配对批次}
+\State $\mathbb{B} \gets [\;]$
+\For{$t = 0$ \textbf{to} $M - 1$}
+  \State $\mathcal{B}_t \gets [\;]$
+  \For{$p = 0$ \textbf{to} $P - 1$}
+    \State $\mathcal{B}_t.\text{append}\big(\mathcal{I}_0[t \cdot P + p]\big)$ \Comment{真图}
+    \State $\mathcal{B}_t.\text{append}\big(\mathcal{I}_1[t \cdot P + p]\big)$ \Comment{假图}
+  \EndFor
+  \State $\mathbb{B}.\text{append}(\mathcal{B}_t)$
+\EndFor
+
+\State \textbf{// 步骤 3：打乱批次顺序}
+\If{$s$}
+  \State $\mathbb{B} \gets \operatorname{Shuffle}(\mathbb{B})$
+\EndIf
+\State \Return $\mathbb{B}$
+
+\vspace{4pt}
+\State \textbf{关键特性：}批次内每个元素都是显式（真图，假图）配对。
+\State 配合 \textsc{RFPairLapPyramidMixup}（算法\,\ref{alg:rf_lap}），
+\State 仅产生 RF 混合输出 — 无 RR、FF、FR 浪费。
+\State \textbf{限制：}当前仅支持单 GPU 训练（DDP 未适配）。
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{LapPyramidMixup（拉普拉斯金字塔残差混合，配合 v1 采样器）}
+\label{alg:lap}
+\begin{algorithmic}[1]\scriptsize
+\Require
+  批次 $\{(\mathbf{x}_i, y_i)\}_{i=1}^{B}$，$\mathbf{x}_i \in \mathbb{R}^{C \times H \times W}$，$y_i \in \{0,1\}$（$0$ = 真，$1$ = 假）；
+  $\alpha > 0$（Beta 形状参数，默认 $5$）；$\gamma \ge 1$（不对称指数，默认 $1$）；
+  $K \in \mathbb{N}^+$（金字塔层数，默认 $3$）；
+  $\bm{\omega} \in \mathbb{R}^{K}$（层权重，默认 $\omega_k = (K - k)\,/\,\sum_j (K - j)$）；
+  $\varepsilon = 10^{-8}$（数值稳定常数）
+\Ensure
+  混合批次 $\{(\tilde{\mathbf{x}}_i, \tilde{y}_i, y^{\text{hard}}_i)\}_{i=1}^{B}$，
+  其中 $\tilde{\mathbf{x}}_i \in \mathbb{R}^{C \times H \times W}$，$\tilde{y}_i \in [0,1]$，$y^{\text{hard}}_i \in \{0,1\}$
+
+\State $\lambda \sim \operatorname{Beta}(\alpha, \alpha)$；\quad $q \gets 1 - \lambda$ \Comment{假图残差注入强度}
+\State $\pi \gets \operatorname{RandPerm}(\{1,\dots,B\})$
+
+\State \textbf{// 步骤 1：按配对类型分区（Q1 锚定规则：真图始终为结构锚点）}
+\State $\mathcal{RR} \gets \{i \mid y_i = 0 \land y_{\pi(i)} = 0\}$；\quad $n_{rr} \gets |\mathcal{RR}|$
+\State $\mathcal{FF} \gets \{i \mid y_i = 1 \land y_{\pi(i)} = 1\}$；\quad $n_{ff} \gets |\mathcal{FF}|$
+\State $\mathbf{r} \gets$ 跨类对中的真图锚点位置（FR 对通过交换合并入 RF）
+\State $\mathbf{f} \gets$ 对应的假图伙伴位置
+\State $n_{rf} \gets |\mathbf{r}|$
+
+\State \textbf{// 步骤 2：RR — 像素空间混合，硬标签 0}
+\State $\tilde{\mathbf{X}}_{rr} \gets \lambda \cdot \mathbf{X}[\mathcal{RR}] + (1-\lambda) \cdot \mathbf{X}[\pi(\mathcal{RR})]$
+\State $\tilde{\mathbf{y}}_{rr} \gets \mathbf{0}^{n_{rr}}$
+
+\State \textbf{// 步骤 3：FF — 像素空间混合，硬标签 1}
+\State $\tilde{\mathbf{X}}_{ff} \gets \lambda \cdot \mathbf{X}[\mathcal{FF}] + (1-\lambda) \cdot \mathbf{X}[\pi(\mathcal{FF})]$
+\State $\tilde{\mathbf{y}}_{ff} \gets \mathbf{1}^{n_{ff}}$
+
+\State \textbf{// 步骤 4：RF — 拉普拉斯金字塔残差混合}
+\If{$n_{rf} > 0$}
+  \State $\mathbf{X}_r \gets \mathbf{X}[\mathbf{r}]$；\quad $\mathbf{X}_f \gets \mathbf{X}[\mathbf{f}]$ \Comment{锚点（真图），伙伴（假图）}
+
+  \For{$i = 1$ \textbf{to} $n_{rf}$} \Comment{逐元素配对 $(\mathbf{r}[i], \mathbf{f}[i])$}
+    \State $\mathbf{x}_r \gets \mathbf{X}_r[i]$；\quad $\mathbf{x}_f \gets \mathbf{X}_f[i]$
+    \State \textbf{// (a) 构建高斯金字塔（5 抽头二项式核 [1,4,6,4,1]/16，可分离卷积，$\downarrow\!2$）}
+    \State $\mathbf{G}_0^r \gets \mathbf{x}_r$；\quad $\mathbf{G}_0^f \gets \mathbf{x}_f$
+    \For{$\ell = 0$ \textbf{to} $K - 1$}
+      \State $\mathbf{G}_{\ell+1} \gets \operatorname{PyrDown}(\mathbf{G}_\ell)$
+    \EndFor
+
+    \State \textbf{// (b) 构建拉普拉斯金字塔：}$\mathbf{L}_\ell = \mathbf{G}_\ell - \operatorname{PyrUp}(\mathbf{G}_{\ell+1})$
+    \State \textbf{//}（PyrUp = 双线性上采样 $\uparrow\!2$，\texttt{F.interpolate(mode='bilinear')}）
+    \For{$\ell = 0$ \textbf{to} $K - 1$}
+      \State $\mathbf{L}_\ell^{\,r} \gets \mathbf{G}_\ell^{\,r} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,r})$
+      \State $\mathbf{L}_\ell^{\,f} \gets \mathbf{G}_\ell^{\,f} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,f})$
+    \EndFor
+
+    \State \textbf{// (c) 逐层混合拉普拉斯残差}
+    \For{$\ell = 0$ \textbf{to} $K - 1$}
+      \State $\mathbf{L}_\ell^{\text{mix}} \gets (1 - q) \cdot \mathbf{L}_\ell^{\,r} + q \cdot \mathbf{L}_\ell^{\,f}$
+      \State $E_\ell^{\,r} \gets \|\mathbf{L}_\ell^{\,r}\|_F^2$；\quad $E_\ell^{\,f} \gets \|\mathbf{L}_\ell^{\,f}\|_F^2$
+    \EndFor
+
+    \State \textbf{// (d) 由残差能量占比计算 Fake 证据度}
+    \State $\text{num} \gets q^2 \sum_{\ell=0}^{K-1} \omega_\ell \cdot E_\ell^{\,f}$
+    \State $\text{den} \gets \sum_{\ell=0}^{K-1} \omega_\ell\big[(1-q)^2 \cdot E_\ell^{\,r} + q^2 \cdot E_\ell^{\,f}\big] + \varepsilon$
+    \State $e_f \gets \text{num} \,/\, \text{den}$
+
+    \State \textbf{// (e) 重建：真实粗结构 + 混合残差}
+    \State $\tilde{\mathbf{x}} \gets \mathbf{G}_K^{\,r}$ \Comment{真图锚点的最粗层高斯分量}
+    \For{$\ell = K-1$ \textbf{downto} $0$}
+      \State $\tilde{\mathbf{x}} \gets \operatorname{PyrUp}(\tilde{\mathbf{x}}) + \mathbf{L}_\ell^{\text{mix}}$
+    \EndFor
+    \State $\tilde{\mathbf{x}} \gets \operatorname{clamp}(\tilde{\mathbf{x}},\; \min(\mathbf{x}_r),\; \max(\mathbf{x}_r))$
+
+    \State \textbf{// (f) 能量锚定软标签（Aggressively Fake）}
+    \State $\tilde{y} \gets 1 - (1 - e_f)^{\gamma}$
+  \EndFor
+\EndIf
+
+\State \textbf{// 步骤 5：组装最终批次}
+\State $\tilde{\mathbf{X}} \gets \operatorname{Concat}(\tilde{\mathbf{X}}_{rr},\, \tilde{\mathbf{X}}_{ff},\, \tilde{\mathbf{X}}_{rf})$
+\State $\tilde{\mathbf{y}} \gets \operatorname{Concat}(\tilde{\mathbf{y}}_{rr},\, \tilde{\mathbf{y}}_{ff},\, \tilde{\mathbf{y}}_{rf})$
+\State $\mathbf{y}^{\text{hard}} \gets \operatorname{Concat}(\mathbf{0}^{n_{rr}},\, \mathbf{1}^{n_{ff}},\, \mathbf{0}^{n_{rf}})$
+
+\State \Return $\{(\tilde{\mathbf{x}}_i, \tilde{y}_i, y^{\text{hard}}_i)\}$
+
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[p]
+\caption{RFPairLapPyramidMixup（v2 采样器，仅 RF 配对）}
+\label{alg:rf_lap}
+\begin{algorithmic}[1]\scriptsize
+\Require
+  来自 \textsc{BalancePairSampler} 的交替配对批次
+  $\{(\mathbf{x}_i, y_i)\}_{i=1}^{2N}$，含配对 $(r_k, f_k)_{k=1}^{N}$；
+  $\alpha > 0$；$\gamma \ge 1$；$K \in \mathbb{N}^+$；$\bm{\omega}$；$\varepsilon$（同算法\,\ref{alg:lap}）
+\Ensure
+  混合批次 $\{(\tilde{\mathbf{x}}_k, \tilde{y}_k, y^{\text{hard}}_k)\}_{k=1}^{N}$（$2N$ 输入 $\to$ $N$ 输出）
+
+\State $\lambda \sim \operatorname{Beta}(\alpha, \alpha)$；\quad $q \gets 1 - \lambda$
+\State $\mathbf{X}_r \gets \mathbf{X}[0::2]$ \Comment{真图锚点 \quad $[N, C, H, W]$}
+\State $\mathbf{X}_f \gets \mathbf{X}[1::2]$ \Comment{假图伙伴 \quad $[N, C, H, W]$}
+
+\State \textbf{// 无需配对类型分类 — 每对都是（真图，假图）}
+
+\State \textbf{// 高斯金字塔（批次并行）}
+\State $\mathbf{G}_0^r \gets \mathbf{X}_r$；\quad $\mathbf{G}_0^f \gets \mathbf{X}_f$
+\For{$\ell = 0$ \textbf{to} $K - 1$}
+  \State $\mathbf{G}_{\ell+1}^r \gets \operatorname{PyrDown}(\mathbf{G}_\ell^r)$
+  \State $\mathbf{G}_{\ell+1}^f \gets \operatorname{PyrDown}(\mathbf{G}_\ell^f)$
+\EndFor
+
+\State \textbf{// 拉普拉斯金字塔}
+\For{$\ell = 0$ \textbf{to} $K - 1$}
+  \State $\mathbf{L}_\ell^{\,r} \gets \mathbf{G}_\ell^{\,r} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,r})$
+  \State $\mathbf{L}_\ell^{\,f} \gets \mathbf{G}_\ell^{\,f} - \operatorname{PyrUp}(\mathbf{G}_{\ell+1}^{\,f})$
+\EndFor
+
+\State \textbf{// 逐层混合拉普拉斯残差}
+\For{$\ell = 0$ \textbf{to} $K - 1$}
+  \State $\mathbf{L}_\ell^{\text{mix}} \gets (1 - q) \cdot \mathbf{L}_\ell^{\,r} + q \cdot \mathbf{L}_\ell^{\,f}$
+  \State $E_\ell^{\,r} \gets$ 逐样本 $\|\mathbf{L}_\ell^{\,r}\|_F^2 \in \mathbb{R}^{N}$；\quad
+        $E_\ell^{\,f} \gets$ 逐样本 $\|\mathbf{L}_\ell^{\,f}\|_F^2 \in \mathbb{R}^{N}$
+\EndFor
+
+\State \textbf{// Fake 证据度（逐样本能量占比）}
+\State $\text{num} \gets q^2 \sum_{\ell=0}^{K-1} \omega_\ell \cdot E_\ell^{\,f}$
+\State $\text{den} \gets \sum_{\ell=0}^{K-1} \omega_\ell\big[(1-q)^2 \cdot E_\ell^{\,r} + q^2 \cdot E_\ell^{\,f}\big] + \varepsilon$
+\State $\mathbf{e}_f \gets \text{num} \,/\, \text{den} \in \mathbb{R}^{N}$
+
+\State \textbf{// 重建：真实粗结构 + 混合残差}
+\State $\tilde{\mathbf{X}} \gets \mathbf{G}_K^{\,r}$ \Comment{从真图的最粗高斯层开始}
+\For{$\ell = K-1$ \textbf{downto} $0$}
+  \State $\tilde{\mathbf{X}} \gets \operatorname{PyrUp}(\tilde{\mathbf{X}}) + \mathbf{L}_\ell^{\text{mix}}$
+\EndFor
+\State $\tilde{\mathbf{X}} \gets \operatorname{clamp}(\tilde{\mathbf{X}},\; \min(\mathbf{X}_r),\; \max(\mathbf{X}_r))$ \Comment{逐样本裁剪}
+
+\State \textbf{// 软标签（全部以真图为锚点）}
+\State $\tilde{\mathbf{y}} \gets 1 - (1 - \mathbf{e}_f)^{\gamma} \in [0,1]^{N}$
+\State $\mathbf{y}^{\text{hard}} \gets \mathbf{0}^{N}$ \Comment{所有锚点均为真图}
+
+\State \Return $\{(\tilde{\mathbf{x}}_k, \tilde{y}_k, 0)\}_{k=1}^{N}$
+
+\vspace{4pt}
+\State \textbf{与算法\,\ref{alg:lap} 的关键区别：}无 RR/FF/FR 配对 — 每个输出均为 RF 混合图像。
+\State 批次大小从 $2N$（加载）减半至 $N$（混合后）。
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}
