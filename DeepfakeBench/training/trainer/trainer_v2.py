@@ -685,6 +685,102 @@ def rf_pair_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     return rf_x, rf_y, rf_label
 
 
+def rrff_explicit_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3):
+    """Explicit within-class Laplacian pyramid mixup for RR and FF pairs.
+
+    Uses v1 sampler (BalanceBatchSampler) — no interleaving, real_ratio
+    controls the per-batch real:fake proportion.
+
+    RR (real+real):
+        Extract all reals from batch, pair via circular shift,
+        Laplacian pyramid mixup (full scope, all levels mixed).
+        G_K from anchor, hard label = 0.
+
+    FF (fake+fake):
+        Extract all fakes from batch, pair via circular shift,
+        Laplacian pyramid mixup (full scope, all levels mixed).
+        G_K from anchor, hard label = 1.
+
+    RF: not produced.
+
+    Each image participates in exactly one pair → M = n_real + n_fake.
+
+    Returns:
+        mixed_x:     [M, C, H, W]
+        mixed_y:     [M] soft labels ∈ {0.0, 1.0}
+        mixed_label: [M] hard labels
+    """
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+    q_val = 1.0 - lam
+
+    y_a = y.float()
+    real_mask = (y_a == 0)
+    fake_mask = (y_a == 1)
+
+    # ── RR: pair reals with reals (circular shift) ──────────────────────────
+    x_real = x[real_mask]
+    n_rr = x_real.size(0)
+    if n_rr > 0:
+        x_anchor = x_real
+        x_partner = torch.roll(x_real, shifts=-1, dims=0)
+
+        gpyr_a = build_gaussian_pyramid(x_anchor, num_levels)
+        gpyr_p = build_gaussian_pyramid(x_partner, num_levels)
+        G_K = gpyr_a[-1]
+        lap_a = build_laplacian_pyramid(gpyr_a)
+        lap_p = build_laplacian_pyramid(gpyr_p)
+        lap_mixed = [(1.0 - q_val) * lap_a[k] + q_val * lap_p[k]
+                     for k in range(num_levels)]
+
+        rr_x = reconstruct_from_lap(G_K, lap_mixed)
+        rr_x = torch.clamp(rr_x,
+                           x_anchor.amin(dim=(-3, -2, -1), keepdim=True),
+                           x_anchor.amax(dim=(-3, -2, -1), keepdim=True))
+        rr_y = torch.zeros(n_rr, device=x.device)
+    else:
+        rr_x = torch.empty(0, *x.shape[1:], device=x.device)
+        rr_y = torch.empty(0, device=x.device)
+
+    # ── FF: pair fakes with fakes (circular shift) ──────────────────────────
+    x_fake = x[fake_mask]
+    n_ff = x_fake.size(0)
+    if n_ff > 0:
+        x_anchor = x_fake
+        x_partner = torch.roll(x_fake, shifts=-1, dims=0)
+
+        gpyr_a = build_gaussian_pyramid(x_anchor, num_levels)
+        gpyr_p = build_gaussian_pyramid(x_partner, num_levels)
+        G_K = gpyr_a[-1]
+        lap_a = build_laplacian_pyramid(gpyr_a)
+        lap_p = build_laplacian_pyramid(gpyr_p)
+        lap_mixed = [(1.0 - q_val) * lap_a[k] + q_val * lap_p[k]
+                     for k in range(num_levels)]
+
+        ff_x = reconstruct_from_lap(G_K, lap_mixed)
+        ff_x = torch.clamp(ff_x,
+                           x_anchor.amin(dim=(-3, -2, -1), keepdim=True),
+                           x_anchor.amax(dim=(-3, -2, -1), keepdim=True))
+        ff_y = torch.ones(n_ff, device=x.device)
+    else:
+        ff_x = torch.empty(0, *x.shape[1:], device=x.device)
+        ff_y = torch.empty(0, device=x.device)
+
+    # ── Combine ────────────────────────────────────────────────────────────
+    parts_x = [t for t in [rr_x, ff_x] if t.numel() > 0]
+    parts_y = [t for t in [rr_y, ff_y] if t.numel() > 0]
+    mixed_x = torch.cat(parts_x, dim=0) if parts_x else x[:0]
+    mixed_y = torch.cat(parts_y, dim=0) if parts_y else y.float()[:0]
+
+    label_parts = []
+    if n_rr > 0:
+        label_parts.append(torch.zeros(n_rr, dtype=y.dtype, device=x.device))
+    if n_ff > 0:
+        label_parts.append(torch.ones(n_ff, dtype=y.dtype, device=x.device))
+    mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
+
+    return mixed_x, mixed_y, mixed_label
+
+
 def lap_pyramid_all_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
                             omega=None, epsilon=1e-8):
     """Laplacian-pyramid mixup for ALL pair types (RR, FF, RF).
@@ -1259,6 +1355,14 @@ class Trainer(object):
                 elif mixup_mode == 'lap_pyramid_rrff':
                     data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
                         lap_pyramid_rrff_mixup(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
+                # ── Explicit within-class RR+FF pyramid mixup (v1 sampler, no RF) ──
+                elif mixup_mode == 'rrff_explicit':
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                        rrff_explicit_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
                             num_levels=self.config.get('lap_num_levels', 3),
