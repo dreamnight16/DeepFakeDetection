@@ -692,12 +692,12 @@ def rrff_explicit_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3):
     controls the per-batch real:fake proportion.
 
     RR (real+real):
-        Extract all reals from batch, pair via circular shift,
+        Extract all reals from batch, pair via randperm,
         Laplacian pyramid mixup (full scope, all levels mixed).
         G_K from anchor, hard label = 0.
 
     FF (fake+fake):
-        Extract all fakes from batch, pair via circular shift,
+        Extract all fakes from batch, pair via randperm,
         Laplacian pyramid mixup (full scope, all levels mixed).
         G_K from anchor, hard label = 1.
 
@@ -717,12 +717,12 @@ def rrff_explicit_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3):
     real_mask = (y_a == 0)
     fake_mask = (y_a == 1)
 
-    # ── RR: pair reals with reals (circular shift) ──────────────────────────
+    # ── RR: pair reals with reals (randperm) ───────────────────────────────
     x_real = x[real_mask]
     n_rr = x_real.size(0)
     if n_rr > 0:
         x_anchor = x_real
-        x_partner = torch.roll(x_real, shifts=-1, dims=0)
+        x_partner = x_real[torch.randperm(n_rr, device=x.device)]
 
         gpyr_a = build_gaussian_pyramid(x_anchor, num_levels)
         gpyr_p = build_gaussian_pyramid(x_partner, num_levels)
@@ -741,12 +741,12 @@ def rrff_explicit_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3):
         rr_x = torch.empty(0, *x.shape[1:], device=x.device)
         rr_y = torch.empty(0, device=x.device)
 
-    # ── FF: pair fakes with fakes (circular shift) ──────────────────────────
+    # ── FF: pair fakes with fakes (randperm) ───────────────────────────────
     x_fake = x[fake_mask]
     n_ff = x_fake.size(0)
     if n_ff > 0:
         x_anchor = x_fake
-        x_partner = torch.roll(x_fake, shifts=-1, dims=0)
+        x_partner = x_fake[torch.randperm(n_ff, device=x.device)]
 
         gpyr_a = build_gaussian_pyramid(x_anchor, num_levels)
         gpyr_p = build_gaussian_pyramid(x_partner, num_levels)
