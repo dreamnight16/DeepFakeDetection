@@ -111,7 +111,7 @@ def build_config(sampler_real_ratio=0.50,
     config['mixup_mode'] = 'rrff_explicit'
     config['mixup_alpha'] = mixup_alpha
     config['mixup_gamma'] = mixup_gamma
-    config['mixup_domain'] = 'rgb'
+    config['mix_domain'] = 'rgb'
     config['lap_num_levels'] = lap_num_levels
     config['mixup_loss_strip'] = False
 

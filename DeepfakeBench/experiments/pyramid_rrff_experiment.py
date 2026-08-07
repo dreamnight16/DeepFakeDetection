@@ -113,7 +113,7 @@ def build_config(mixup_mode='lap_pyramid_rrff',
     config['mixup_mode'] = mixup_mode
     config['mixup_alpha'] = mixup_alpha
     config['mixup_gamma'] = mixup_gamma
-    config['mixup_domain'] = 'rgb'
+    config['mix_domain'] = 'rgb'
     config['lap_num_levels'] = lap_num_levels
     config['mixup_loss_strip'] = mixup_loss_strip
 

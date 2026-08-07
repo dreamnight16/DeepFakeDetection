@@ -104,7 +104,7 @@ def build_config(pyramid_mode='lap_pyramid',
     config['mixup_mode'] = pyramid_mode
     config['mixup_alpha'] = mixup_alpha
     config['mixup_gamma'] = mixup_gamma
-    config['mixup_domain'] = 'rgb'
+    config['mix_domain'] = 'rgb'
     config['lap_num_levels'] = lap_num_levels
     config['mixup_loss_strip'] = mixup_loss_strip
 
@@ -195,6 +195,76 @@ def train_model(config, train_dataset, val_dataset):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  testall.py evaluation (video_auc, auc, acc per dataset)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_testall(ckpt_path, test_datasets, log_path):
+    """Run testall.py on checkpoint; return per-dataset metrics dict."""
+    testall_py = os.path.join(_deepfake_dir, 'testall.py')
+
+    TMP_YAML = tempfile.mkstemp(suffix='.yaml', prefix='effort_testall_')[1]
+    with open(DETECTOR_YAML, 'r') as f:
+        yaml_config = yaml.safe_load(f)
+    with open(TEST_YAML, 'r') as f:
+        test_config = yaml.safe_load(f)
+    yaml_config.update(test_config)
+    _json_folder = os.path.join(_deepfake_dir, 'preprocessing', 'dataset_json')
+    if os.path.isdir(_json_folder):
+        yaml_config['dataset_json_folder'] = _json_folder
+    with open(TMP_YAML, 'w') as f:
+        yaml.dump(yaml_config, f)
+
+    cmd = [
+        sys.executable, testall_py,
+        '--detector_path', TMP_YAML,
+        '--weights_path', ckpt_path,
+        '--test_datasets',
+    ] + test_datasets
+
+    print(f"  [testall] {' '.join(cmd)}")
+    sys.stdout.flush()
+
+    with open(log_path, 'w') as log_f:
+        proc = subprocess.run(cmd, stdout=log_f, stderr=subprocess.STDOUT)
+    os.unlink(TMP_YAML)
+
+    # Parse per-dataset results
+    metrics = {}
+    with open(log_path, 'r') as log_f:
+        current_ds = None
+        for line in log_f:
+            line = line.strip()
+            if line.startswith('dataset:'):
+                current_ds = line.split('dataset:')[1].strip()
+                metrics[current_ds] = {}
+            elif current_ds and line.startswith('acc:'):
+                metrics[current_ds]['acc'] = float(line.split(':')[1].strip())
+            elif current_ds and line.startswith('auc:'):
+                metrics[current_ds]['auc'] = float(line.split(':')[1].strip())
+            elif current_ds and line.startswith('video_auc:'):
+                metrics[current_ds]['video_auc'] = float(line.split(':')[1].strip())
+
+    # Parse average block (last occurrence)
+    with open(log_path, 'r') as log_f:
+        for line in log_f:
+            line = line.strip()
+            if line.startswith('acc:'):
+                metrics['average'] = metrics.get('average', {})
+                metrics['average']['acc'] = float(line.split(':')[1].strip())
+            elif line.startswith('auc:'):
+                metrics['average'] = metrics.get('average', {})
+                metrics['average']['auc'] = float(line.split(':')[1].strip())
+            elif line.startswith('video_auc:'):
+                metrics['average'] = metrics.get('average', {})
+                metrics['average']['video_auc'] = float(line.split(':')[1].strip())
+
+    if proc.returncode != 0:
+        print(f"  [testall] WARNING: exited with code {proc.returncode}")
+
+    return metrics
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Evaluation
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -276,7 +346,7 @@ def compute_metrics(probs, labels):
     }
 
 
-def print_results(exp_name, test_metrics, train_probs, train_labels,
+def print_results(exp_name, testall_metrics, train_probs, train_labels,
                   test_probs_dict, test_labels_dict, output_dir):
     """Print metrics and save score distribution plots."""
     os.makedirs(output_dir, exist_ok=True)
@@ -284,6 +354,22 @@ def print_results(exp_name, test_metrics, train_probs, train_labels,
     print(f"\n{'='*70}")
     print(f"  {exp_name}")
     print(f"{'='*70}")
+
+    # ── testall.py metrics ──────────────────────────────────────────────
+    if testall_metrics:
+        avg_m = testall_metrics.get('average', {})
+        print(f"\n  ── testall.py (avg per dataset) ──")
+        print(f"  video_auc: {avg_m.get('video_auc', 'N/A')}")
+        print(f"  auc:       {avg_m.get('auc', 'N/A')}")
+        print(f"  acc:       {avg_m.get('acc', 'N/A')}")
+
+        print(f"\n  ── testall per-dataset ──")
+        print(f"  {'Dataset':<25s} | {'video_auc':>9s} | {'auc':>9s} | {'acc':>9s}")
+        print(f"  {'-'*25} | {'-'*9} | {'-'*9} | {'-'*9}")
+        for ds in sorted(testall_metrics.keys()):
+            m = testall_metrics[ds]
+            print(f"  {ds:<25s} | {str(m.get('video_auc', 'N/A')):>9s} | "
+                  f"{str(m.get('auc', 'N/A')):>9s} | {str(m.get('acc', 'N/A')):>9s}")
 
     # ── Train set metrics ─────────────────────────────────────────────────
     if len(train_probs) > 0:
@@ -491,8 +577,13 @@ def main():
             train_loader = get_train_loader(config_eval)
             train_probs_orig, train_labels_orig = collect_predictions(model_orig, train_loader)
 
+            # testall.py evaluation
+            print(f"  Running testall.py...")
+            testall_log1 = os.path.join(exp1_dir, 'testall.log')
+            testall_metrics_orig = run_testall(ckpt_orig, args.test_datasets, testall_log1)
+
             print_results(exp1_name,
-                          {}, train_probs_orig, train_labels_orig,
+                          testall_metrics_orig, train_probs_orig, train_labels_orig,
                           test_probs_orig, test_labels_orig, exp1_dir)
 
             del model_orig
@@ -564,8 +655,13 @@ def main():
             train_loader2 = get_train_loader(config_eval2)
             train_probs_strip, train_labels_strip = collect_predictions(model_strip, train_loader2)
 
+            # testall.py evaluation
+            print(f"  Running testall.py...")
+            testall_log2 = os.path.join(exp2_dir, 'testall.log')
+            testall_metrics_strip = run_testall(ckpt_strip, args.test_datasets, testall_log2)
+
             print_results(exp2_name,
-                          {}, train_probs_strip, train_labels_strip,
+                          testall_metrics_strip, train_probs_strip, train_labels_strip,
                           test_probs_strip, test_labels_strip, exp2_dir)
 
             del model_strip
