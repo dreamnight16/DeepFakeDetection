@@ -11,7 +11,8 @@
 #
 # All results saved to: ./experiment_results/master_sweep_YYYYMMDD_HHMMSS/
 # ===========================================================================
-set -euo pipefail
+set -uo pipefail
+# NOTE: NO set -e — one experiment failing must not kill the entire sweep.
 
 NGPU=${1:-1}
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
@@ -310,15 +311,15 @@ echo "    2/5  Beta(2,5) on top+l1                     —  2 configs" | tee -a 
 echo "    3/5  Full Scope (label0/1)                   —  2 configs" | tee -a "$MASTER_LOG"
 echo "    4/5  Pyramid Loss Ablation (soft vs hard CE)  —  2 configs" | tee -a "$MASTER_LOG"
 echo "    5/5  RR+FF Pyramid (strip vs rrff)            —  2 configs" | tee -a "$MASTER_LOG"
-echo "         Total: 1 baseline + 12 configs" | tee -a "$MASTER_LOG"
+echo "         Total: 12 configs" | tee -a "$MASTER_LOG"
+echo "         (G4 Exp1 = BASELINE)" | tee -a "$MASTER_LOG"
 echo "" | tee -a "$MASTER_LOG"
 
-run_baseline
-run_group1
-run_group2
-run_group3
-run_group4
-run_group5
+run_group1 || echo "  *** [G1] FAILED ***" | tee -a "$MASTER_LOG"
+run_group2 || echo "  *** [G2] FAILED ***" | tee -a "$MASTER_LOG"
+run_group3 || echo "  *** [G3] FAILED ***" | tee -a "$MASTER_LOG"
+run_group4 || echo "  *** [G4] FAILED ***" | tee -a "$MASTER_LOG"
+run_group5 || echo "  *** [G5] FAILED ***" | tee -a "$MASTER_LOG"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Master Summary Table
