@@ -245,7 +245,13 @@ class EffortDetector(nn.Module):
                 fake_losses = per_sample[mask_fake]
                 loss = torch.cat([rr_losses, rf_losses, fake_losses]).mean()
             else:
-                loss = per_sample.mean()
+                # ── Apply loss_mask (zero out RF if mixup_loss_strip) ──
+                if 'loss_mask' in data_dict:
+                    mask = data_dict['loss_mask']
+                    per_sample = per_sample * mask
+                    loss = per_sample.sum() / mask.sum().clamp(min=1)
+                else:
+                    loss = per_sample.mean()
 
             # Per-class decomposition from soft labels:
             # real contribution = (1 - y_soft) · loss, fake contribution = y_soft · loss

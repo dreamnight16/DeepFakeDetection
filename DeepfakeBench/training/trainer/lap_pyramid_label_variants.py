@@ -166,4 +166,14 @@ def lap_pyramid_label_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     mixed_y = torch.cat(parts_y, dim=0)
     mixed_label = torch.cat(parts_label, dim=0)
 
-    return mixed_x, mixed_y, mixed_label
+    # ── loss_mask ──────────────────────────────────────────────────────────
+    mask_parts = []
+    if rr_n > 0:
+        mask_parts.append(torch.ones(rr_n, device=x.device, dtype=torch.float32))
+    if ff_n > 0:
+        mask_parts.append(torch.ones(ff_n, device=x.device, dtype=torch.float32))
+    if n_rf > 0:
+        mask_parts.append(torch.ones(n_rf, device=x.device, dtype=torch.float32))
+    loss_mask = torch.cat(mask_parts, dim=0) if mask_parts else mixed_y.new_zeros(0)
+
+    return mixed_x, mixed_y, mixed_label, loss_mask

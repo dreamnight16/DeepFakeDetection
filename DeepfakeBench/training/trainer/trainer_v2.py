@@ -616,7 +616,17 @@ def lap_pyramid_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
         label_parts.append(torch.zeros(n_rf, dtype=y.dtype, device=x.device))
     mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
 
-    return mixed_x, mixed_y, mixed_label
+    # ── loss_mask: which samples participate in loss ────────────────────────
+    mask_parts = []
+    if n_rr > 0:
+        mask_parts.append(torch.ones(n_rr, device=x.device, dtype=torch.float32))
+    if n_ff > 0:
+        mask_parts.append(torch.ones(n_ff, device=x.device, dtype=torch.float32))
+    if n_rf > 0:
+        mask_parts.append(torch.ones(n_rf, device=x.device, dtype=torch.float32))
+    loss_mask = torch.cat(mask_parts, dim=0) if mask_parts else mixed_y.new_zeros(0)
+
+    return mixed_x, mixed_y, mixed_label, loss_mask
 
 
 def rf_pair_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
@@ -682,7 +692,7 @@ def rf_pair_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     rf_y = 1.0 - (1.0 - e_f) ** gamma
     rf_label = torch.zeros(N, dtype=y.dtype, device=x.device)
 
-    return rf_x, rf_y, rf_label
+    return rf_x, rf_y, rf_label, torch.ones(N, device=x.device, dtype=torch.float32)
 
 
 def rrff_explicit_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3):
@@ -778,7 +788,7 @@ def rrff_explicit_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3):
         label_parts.append(torch.ones(n_ff, dtype=y.dtype, device=x.device))
     mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
 
-    return mixed_x, mixed_y, mixed_label
+    return mixed_x, mixed_y, mixed_label, torch.ones_like(mixed_y)
 
 
 def lap_pyramid_all_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
@@ -934,7 +944,7 @@ def lap_pyramid_all_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
         label_parts.append(torch.zeros(n_rf, dtype=y.dtype, device=x.device))
     mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
 
-    return mixed_x, mixed_y, mixed_label
+    return mixed_x, mixed_y, mixed_label, torch.ones_like(mixed_y)
 
 
 def lap_pyramid_rrff_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
@@ -1060,7 +1070,7 @@ def lap_pyramid_rrff_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
         label_parts.append(torch.ones(n_ff, dtype=y.dtype, device=x.device))
     mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
 
-    return mixed_x, mixed_y, mixed_label
+    return mixed_x, mixed_y, mixed_label, torch.ones_like(mixed_y) if mixed_y.numel() > 0 else mixed_y.new_zeros(0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1305,7 +1315,7 @@ class Trainer(object):
                 if pair_mode:
                     # v2: interleaved RF pairs — fixed pairing, no randperm
                     # Always uses Laplacian pyramid (rf_pair_mixup), ignores mixup_mode
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
                         rf_pair_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
@@ -1317,8 +1327,11 @@ class Trainer(object):
                         alpha=alpha, gamma=gamma, hf_cutoff=hf_cutoff,
                         ycbcr=use_ycbcr, mix_freq=mix_freq,
                     )
+                    data_dict['loss_mask'] = torch.ones(data_dict['image'].size(0),
+                                                         device=data_dict['image'].device,
+                                                         dtype=torch.float32)
                 elif mixup_mode == 'lap_pyramid':
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
                         lap_pyramid_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
@@ -1334,7 +1347,7 @@ class Trainer(object):
                     _parts = mixup_mode.split('_')  # lap_pyramid_label{0|1}_{top|bottom|full}
                     _label = int(_parts[2][-1])     # 'label0' → 0, 'label1' → 1
                     _scope = _parts[3]              # 'top' | 'bottom' | 'full'
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
                         lap_pyramid_label_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
@@ -1345,7 +1358,7 @@ class Trainer(object):
                         )
                 # ── All pairs pyramid mixup (RR+FF+RF all Laplacian) ──
                 elif mixup_mode == 'lap_pyramid_all':
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
                         lap_pyramid_all_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
@@ -1353,7 +1366,7 @@ class Trainer(object):
                         )
                 # ── RR+FF pyramid mixup only (no RF cross-class pairs) ──
                 elif mixup_mode == 'lap_pyramid_rrff':
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
                         lap_pyramid_rrff_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
@@ -1361,7 +1374,7 @@ class Trainer(object):
                         )
                 # ── Explicit within-class RR+FF pyramid mixup (v1 sampler, no RF) ──
                 elif mixup_mode == 'rrff_explicit':
-                    data_dict['image'], data_dict['label_soft'], data_dict['label'] = \
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
                         rrff_explicit_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
@@ -1374,14 +1387,16 @@ class Trainer(object):
                         selection=self.config.get('mixup_selection', 'hardest'),
                         hf_cutoff=hf_cutoff, ycbcr=use_ycbcr, mix_freq=mix_freq,
                     )
-            # ── Strip RF from loss: keep only RR (ỹ=0) + FF (ỹ=1) ─────────
-            if self.config.get('mixup_loss_strip', False):
+                    data_dict['loss_mask'] = torch.ones(data_dict['image'].size(0),
+                                                         device=data_dict['image'].device,
+                                                         dtype=torch.float32)
+            # ── Strip RF from loss: zero out loss_mask for RF pairs ─────────
+            if self.config.get('mixup_loss_strip', False) and 'label_soft' in data_dict:
                 y_soft = data_dict['label_soft']
                 # RF samples: ỹ ∈ (0, 1), i.e. not exactly 0 or 1
-                keep = (y_soft <= 1e-6) | (y_soft >= 1.0 - 1e-6)  # RR + FF only
-                if keep.sum() > 0:
-                    data_dict['image'] = data_dict['image'][keep]
-                    data_dict['label'] = data_dict['label'][keep]
+                is_rf = ~((y_soft <= 1e-6) | (y_soft >= 1.0 - 1e-6))
+                data_dict['loss_mask'] = data_dict['loss_mask'].clone()
+                data_dict['loss_mask'][is_rf] = 0.0
                 data_dict.pop('label_soft', None)
             # ──────────────────────────────────────────────────────────────
             losses,predictions=self.train_step(data_dict)

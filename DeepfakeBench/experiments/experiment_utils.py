@@ -1,0 +1,346 @@
+"""
+Shared experiment utilities for pyramid mixup experiments.
+Reuses train.py + testall.py as subprocesses, plus direct model loading for
+frame-level confusion matrix and KDE score distributions.
+"""
+import os
+import sys
+import tempfile
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import yaml
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_deepfake_dir = os.path.dirname(_current_dir)
+_training_dir = os.path.join(_deepfake_dir, 'training')
+sys.path.insert(0, _training_dir)
+sys.path.insert(0, _deepfake_dir)
+
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from sklearn.metrics import confusion_matrix as sk_cm, accuracy_score
+from dataset.abstract_dataset import DeepfakeAbstractBaseDataset
+from detectors import DETECTOR
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+DETECTOR_YAML = os.path.join(_training_dir, 'config', 'detector', 'effort.yaml')
+TRAIN_YAML  = os.path.join(_training_dir, 'config', 'train_config.yaml')
+TEST_YAML   = os.path.join(_training_dir, 'config', 'test_config.yaml')
+
+
+# ── Config helpers ─────────────────────────────────────────────────────────
+
+def build_config(pyramid_mode='lap_pyramid',
+                 mixup_loss_strip=False,
+                 mixup_alpha=5.0, mixup_gamma=1.0,
+                 mixup_beta_b=None, mixup_beta_flip=False,
+                 lap_num_levels=3,
+                 sampler_real_ratio=0.30,
+                 log_dir=None,
+                 train_dataset=None, test_dataset=None,
+                 n_epochs=10, for_training=True):
+    """Build merged config dict with experiment parameters."""
+    with open(DETECTOR_YAML, 'r') as f:
+        config = yaml.safe_load(f)
+    base = TRAIN_YAML if for_training else TEST_YAML
+    with open(base, 'r') as f:
+        config.update(yaml.safe_load(f))
+    json_folder = os.path.join(_deepfake_dir, 'preprocessing', 'dataset_json')
+    if os.path.isdir(json_folder):
+        config['dataset_json_folder'] = json_folder
+
+    config['use_mixup'] = True
+    config['mixup_mode'] = pyramid_mode
+    config['mixup_alpha'] = mixup_alpha
+    config['mixup_gamma'] = mixup_gamma
+    config['mix_domain'] = 'rgb'
+    config['lap_num_levels'] = lap_num_levels
+    config['mixup_loss_strip'] = mixup_loss_strip
+    if mixup_beta_b is not None:
+        config['mixup_beta_b'] = mixup_beta_b
+    config['mixup_beta_flip'] = mixup_beta_flip
+
+    config['balance_sampler_v2'] = False
+    config['use_balance_batch_sampler'] = True
+    config['sampler_real_ratio'] = sampler_real_ratio
+
+    if log_dir is not None:
+        config['log_dir'] = log_dir
+    if train_dataset is not None:
+        config['train_dataset'] = [train_dataset] if isinstance(train_dataset, str) else train_dataset
+    if test_dataset is not None:
+        config['test_dataset'] = [test_dataset] if isinstance(test_dataset, str) else test_dataset
+
+    config['nEpochs'] = n_epochs
+    config['ddp'] = False
+    config['local_rank'] = 0
+    config['save_ckpt'] = True
+    config['save_feat'] = True
+    config['save_avg'] = True
+    return config
+
+
+def save_temp_yaml(config, prefix='effort_exp_'):
+    fd, path = tempfile.mkstemp(suffix='.yaml', prefix=prefix)
+    os.close(fd)
+    with open(path, 'w') as f:
+        yaml.dump(config, f)
+    return path
+
+
+# ── Training (subprocess) ──────────────────────────────────────────────────
+
+def train_model(config, train_dataset, val_dataset):
+    """Train EffortDetector via train.py subprocess; return best checkpoint path."""
+    yaml_path = save_temp_yaml(config)
+    train_py = os.path.join(_training_dir, 'train.py')
+    cmd = [sys.executable, train_py, '--detector_path', yaml_path,
+           '--train_dataset', train_dataset, '--test_dataset', val_dataset]
+    print(f"[train] {' '.join(cmd)}")
+    sys.stdout.flush()
+    proc = subprocess.run(cmd, capture_output=False)
+    if proc.returncode != 0:
+        print(f"[train] WARNING: exit code {proc.returncode}")
+        os.unlink(yaml_path)
+        return None
+    log_dir = config['log_dir']
+    ckpt_candidates = list(Path(log_dir).glob('effort_*/test/avg/ckpt_best.pth'))
+    if not ckpt_candidates:
+        print(f"[train] WARNING: no checkpoint under {log_dir}")
+        os.unlink(yaml_path)
+        return None
+    ckpt = str(sorted(ckpt_candidates, key=os.path.getmtime)[-1])
+    print(f"[train] best ckpt: {ckpt}")
+    os.unlink(yaml_path)
+    return ckpt
+
+
+# ── testall.py evaluation (subprocess) ─────────────────────────────────────
+
+def run_testall(ckpt_path, test_datasets, log_path):
+    """Run testall.py on checkpoint; return per-dataset metrics dict."""
+    testall_py = os.path.join(_deepfake_dir, 'testall.py')
+    TMP = tempfile.mkstemp(suffix='.yaml', prefix='effort_testall_')[1]
+    with open(DETECTOR_YAML, 'r') as f:
+        yc = yaml.safe_load(f)
+    with open(TEST_YAML, 'r') as f:
+        yc.update(yaml.safe_load(f))
+    json_folder = os.path.join(_deepfake_dir, 'preprocessing', 'dataset_json')
+    if os.path.isdir(json_folder):
+        yc['dataset_json_folder'] = json_folder
+    with open(TMP, 'w') as f:
+        yaml.dump(yc, f)
+    cmd = [sys.executable, testall_py, '--detector_path', TMP,
+           '--weights_path', ckpt_path, '--test_datasets'] + test_datasets
+    print(f"  [testall] {' '.join(cmd)}")
+    sys.stdout.flush()
+    with open(log_path, 'w') as lf:
+        proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
+    os.unlink(TMP)
+    metrics = {}
+    with open(log_path, 'r') as lf:
+        current_ds = None
+        for line in lf:
+            line = line.strip()
+            if line.startswith('dataset:'):
+                current_ds = line.split('dataset:')[1].strip()
+                metrics[current_ds] = {}
+            elif current_ds:
+                for k in ['acc', 'auc', 'video_auc']:
+                    if line.startswith(f'{k}:'):
+                        metrics[current_ds][k] = float(line.split(':')[1].strip())
+    with open(log_path, 'r') as lf:
+        for line in lf:
+            line = line.strip()
+            for k in ['acc', 'auc', 'video_auc']:
+                if line.startswith(f'{k}:'):
+                    metrics.setdefault('average', {})[k] = float(line.split(':')[1].strip())
+    return metrics
+
+
+# ── Model loading and frame-level evaluation ───────────────────────────────
+
+def load_model(config, ckpt_path):
+    """Load EffortDetector from config + checkpoint."""
+    model_class = DETECTOR[config['model_name']]
+    model = model_class(config).to(DEVICE)
+    ckpt = torch.load(ckpt_path, map_location=DEVICE)
+    if 'state_dict' in ckpt:
+        ckpt = ckpt['state_dict']
+    new_weights = {k.replace('module.', ''): v for k, v in ckpt.items()}
+    model.load_state_dict(new_weights, strict=True)
+    model.eval()
+    return model
+
+
+def get_data_loader(config, dataset_name, mode='test'):
+    """Build a DataLoader for a single dataset."""
+    cfg = config.copy()
+    cfg['test_dataset'] = dataset_name
+    ds = DeepfakeAbstractBaseDataset(config=cfg, mode=mode)
+    return DataLoader(ds, batch_size=cfg['test_batchSize'], shuffle=False,
+                      num_workers=int(cfg.get('workers', 4)),
+                      collate_fn=ds.collate_fn)
+
+
+def get_train_loader(config):
+    """Build a DataLoader for training data — no augmentations."""
+    cfg = config.copy()
+    cfg['use_data_augmentation'] = False
+    ds = DeepfakeAbstractBaseDataset(config=cfg, mode='train')
+    return DataLoader(ds, batch_size=cfg['test_batchSize'], shuffle=False,
+                      num_workers=int(cfg.get('workers', 4)),
+                      collate_fn=ds.collate_fn)
+
+
+@torch.no_grad()
+def collect_predictions(model, data_loader):
+    """Run model on data_loader; return (probs, labels) as numpy arrays."""
+    probs_list, labels_list = [], []
+    for data_dict in tqdm(data_loader, desc='eval', leave=False):
+        data_dict['label'] = torch.where(data_dict['label'] != 0, 1, 0)
+        for k in list(data_dict.keys()):
+            if data_dict[k] is not None and k != 'name':
+                data_dict[k] = data_dict[k].to(DEVICE)
+        pred = model(data_dict, inference=True)
+        probs_list.append(pred['prob'].cpu().numpy())
+        labels_list.append(data_dict['label'].cpu().numpy())
+    return np.concatenate(probs_list), np.concatenate(labels_list)
+
+
+def compute_metrics(probs, labels):
+    """Compute accuracy, confusion matrix from predictions."""
+    preds = (probs > 0.5).astype(int)
+    acc = float(accuracy_score(labels, preds))
+    cm = sk_cm(labels, preds, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    return {'acc': acc, 'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp)}
+
+
+# ── Full evaluation runner ─────────────────────────────────────────────────
+
+def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, exp_name):
+    """Full eval: testall + frame-level confusion matrix + KDE plots.
+    Returns summary dict.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    model = load_model(config, ckpt_path)
+
+    # Frame-level test
+    test_probs, test_labels = {}, {}
+    for ds in test_datasets:
+        loader = get_data_loader(config, ds, mode='test')
+        test_probs[ds], test_labels[ds] = collect_predictions(model, loader)
+
+    # Frame-level train
+    train_loader = get_train_loader(config)
+    train_probs, train_labels = collect_predictions(model, train_loader)
+
+    # testall
+    testall_log = os.path.join(output_dir, 'testall.log')
+    testall_metrics = run_testall(ckpt_path, test_datasets, testall_log)
+
+    del model
+    torch.cuda.empty_cache()
+
+    # Print results
+    print_results(exp_name, train_probs, train_labels, test_probs, test_labels,
+                  testall_metrics, output_dir)
+
+    # Return summary dict
+    summary = {'exp_name': exp_name}
+    if testall_metrics:
+        summary['testall'] = testall_metrics
+    train_m = compute_metrics(train_probs, train_labels)
+    summary['train_acc'] = train_m['acc']
+    summary['test_acc'] = {}
+    for ds in test_datasets:
+        m = compute_metrics(test_probs[ds], test_labels[ds])
+        summary['test_acc'][ds] = m['acc']
+    summary['test_acc_avg'] = float(np.mean(list(summary['test_acc'].values())))
+    return summary
+
+
+# ── Output ─────────────────────────────────────────────────────────────────
+
+def print_results(exp_name, train_probs, train_labels,
+                  test_probs_dict, test_labels_dict, testall_metrics, output_dir):
+    """Print metrics and save score distribution plots."""
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"\n{'='*70}\n  {exp_name}\n{'='*70}")
+    if testall_metrics:
+        avg = testall_metrics.get('average', {})
+        print(f"\n  -- testall (avg) --")
+        for k in ['video_auc', 'auc', 'acc']:
+            print(f"  {k}: {avg.get(k, 'N/A')}")
+    if len(train_probs) > 0:
+        m = compute_metrics(train_probs, train_labels)
+        print(f"\n  -- Train --\n  Acc: {m['acc']:.4f}")
+        print(f"  CM: TN={m['tn']} FP={m['fp']} FN={m['fn']} TP={m['tp']}")
+        print(f"\n  -- Test Sets --")
+        print(f"  {'Dataset':<25s} | {'Acc':>8s} | {'TN':>6s} | {'FP':>6s} | {'FN':>6s} | {'TP':>6s}")
+        print(f"  {'-'*25} | {'-'*8} | {'-'*6} | {'-'*6} | {'-'*6} | {'-'*6}")
+    all_acc, total_tn, total_fp, total_fn, total_tp = [], 0, 0, 0, 0
+    for ds in sorted(test_probs_dict.keys()):
+        m = compute_metrics(test_probs_dict[ds], test_labels_dict[ds])
+        all_acc.append(m['acc'])
+        total_tn += m['tn']; total_fp += m['fp']
+        total_fn += m['fn']; total_tp += m['tp']
+        print(f"  {ds:<25s} | {m['acc']:8.4f} | {m['tn']:6d} | {m['fp']:6d} | {m['fn']:6d} | {m['tp']:6d}")
+    if len(all_acc) > 1:
+        print(f"  {'-'*25} | {'-'*8} | {'-'*6} | {'-'*6} | {'-'*6} | {'-'*6}")
+        print(f"  {'average':<25s} | {np.mean(all_acc):8.4f} | {total_tn:6d} | {total_fp:6d} | {total_fn:6d} | {total_tp:6d}")
+    _plot_score_distributions(exp_name, output_dir, train_probs, train_labels,
+                               test_probs_dict, test_labels_dict)
+
+
+def _plot_score_distributions(exp_name, output_dir, train_probs, train_labels,
+                               test_probs_dict, test_labels_dict):
+    safe_name = exp_name.replace(' ', '_').replace('/', '_')
+    n_test = len(test_probs_dict)
+    has_train = len(train_probs) > 0
+    n_cols = n_test + (1 if has_train else 0)
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4), sharey=False)
+    if n_cols == 1:
+        axes = [axes]
+    xs = np.linspace(0, 1, 500)
+    col_idx = 0
+    if has_train:
+        _plot_one_dist(axes[col_idx], train_probs, train_labels, 'Train Set', 'tab:blue', xs)
+        col_idx += 1
+    colors = plt.cm.tab10.colors
+    for ds in sorted(test_probs_dict.keys()):
+        _plot_one_dist(axes[col_idx], test_probs_dict[ds], test_labels_dict[ds], ds,
+                       colors[col_idx % len(colors)], xs)
+        col_idx += 1
+    fig.suptitle(f"Score Distributions — {exp_name}\n(Real vs Fake, per Dataset)",
+                 fontsize=13, y=1.02)
+    fig.tight_layout()
+    out_path = os.path.join(output_dir, f"score_dist_{safe_name}.png")
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"\n  Score plot: {out_path}")
+
+
+def _plot_one_dist(ax, probs, labels, title, color, xs):
+    for lbl, lname, ls in [(0, 'Real', '--'), (1, 'Fake', '-')]:
+        subset = probs[labels == lbl]
+        if len(subset) >= 2:
+            kde = gaussian_kde(subset, bw_method=0.08)
+            ys = kde(xs)
+            ax.plot(xs, ys, color=color, linewidth=2, linestyle=ls, label=lname)
+            ax.fill_between(xs, ys, alpha=0.12, color=color)
+    ax.set_title(title, fontsize=11)
+    ax.set_xlabel('Fake Probability', fontsize=10)
+    ax.set_ylabel('Density', fontsize=10)
+    ax.set_xlim(0, 1)
+    ax.legend(fontsize=9)
+    ax.grid(True, linestyle='--', alpha=0.4)
