@@ -128,18 +128,14 @@ def build_config(pyramid_mode='lap_pyramid',
     if test_dataset is not None:
         config['test_dataset'] = test_dataset if isinstance(test_dataset, list) else [test_dataset]
 
+    # ── Subprocess launcher (must be set; not in effort.yaml) ─────────────
     config['nEpochs'] = n_epochs
-    config['dry_run'] = False
     config['ddp'] = False
     config['local_rank'] = 0
     config['save_ckpt'] = True
     config['save_feat'] = True
     config['save_avg'] = True
-    config['workers'] = 8
-    config['train_batchSize'] = 32
-    config['test_batchSize'] = 32
-    config['lmdb'] = False
-    config['start_epoch'] = 0
+    # All other keys (workers, batch sizes, etc.) inherited from effort.yaml
 
     return config
 
