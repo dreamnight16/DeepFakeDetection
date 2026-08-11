@@ -38,9 +38,9 @@ EXPERIMENTS = [
 
     # ── G2: Beta(2,5) on label1_top ───────────────────────────────────────
     {'group': 'G2', 'name': 'beta25',       'mode': 'lap_pyramid_label1_top', 'strip': False,
-     'beta_b': 5, 'beta_flip': False},
+     'alpha': 2, 'beta_b': 5, 'beta_flip': False},
     {'group': 'G2', 'name': 'beta25_flip',  'mode': 'lap_pyramid_label1_top', 'strip': False,
-     'beta_b': 5, 'beta_flip': True},
+     'alpha': 2, 'beta_b': 5, 'beta_flip': True},
 
     # ── G3: Full scope label 0/1 ───────────────────────────────────────────
     {'group': 'G3', 'name': 'label0_full',  'mode': 'lap_pyramid_label0_full', 'strip': False},
@@ -62,11 +62,13 @@ def run_one(exp, args):
     output_dir = os.path.join(args.output_dir, exp['group'], exp['name'])
     os.makedirs(output_dir, exist_ok=True)
 
+    exp_alpha = exp.get('alpha', args.alpha)
+
     log_dir = os.path.join(args.output_dir, 'logs', exp['group'], exp['name'])
     config = build_config(
         pyramid_mode=exp['mode'],
         mixup_loss_strip=exp['strip'],
-        mixup_alpha=args.alpha, mixup_gamma=args.gamma,
+        mixup_alpha=exp_alpha, mixup_gamma=args.gamma,
         mixup_beta_b=exp.get('beta_b'), mixup_beta_flip=exp.get('beta_flip', False),
         lap_num_levels=args.num_levels,
         sampler_real_ratio=args.sampler_real_ratio,
@@ -84,7 +86,7 @@ def run_one(exp, args):
     # Eval
     config_eval = build_config(
         pyramid_mode=exp['mode'], mixup_loss_strip=exp['strip'],
-        mixup_alpha=args.alpha,
+        mixup_alpha=exp_alpha,
         mixup_beta_b=exp.get('beta_b'), mixup_beta_flip=exp.get('beta_flip', False),
         lap_num_levels=args.num_levels,
         sampler_real_ratio=args.sampler_real_ratio,
