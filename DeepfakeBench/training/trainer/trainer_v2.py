@@ -1397,7 +1397,10 @@ class Trainer(object):
                 is_rf = ~((y_soft <= 1e-6) | (y_soft >= 1.0 - 1e-6))
                 data_dict['loss_mask'] = data_dict['loss_mask'].clone()
                 data_dict['loss_mask'][is_rf] = 0.0
-                data_dict.pop('label_soft', None)
+                # NOTE: keep label_soft — get_losses applies loss_mask in the
+                # soft-label CE branch, so RF samples are excluded from loss.
+                # Popping label_soft would route to hard-label CE, which ignores
+                # loss_mask and lets RF (hard label 0) back into the loss.
             # ──────────────────────────────────────────────────────────────
             losses,predictions=self.train_step(data_dict)
 

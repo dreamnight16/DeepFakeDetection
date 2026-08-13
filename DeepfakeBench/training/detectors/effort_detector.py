@@ -254,9 +254,16 @@ class EffortDetector(nn.Module):
                     loss = per_sample.mean()
 
             # Per-class decomposition from soft labels:
-            # real contribution = (1 - y_soft) · loss, fake contribution = y_soft · loss
-            w_real = (1.0 - y_soft).sum().clamp(min=1)
-            w_fake = y_soft.sum().clamp(min=1)
+            # real contribution = (1 - y_soft) · loss, fake contribution = y_soft · loss.
+            # When loss_mask strips RF (mixup_loss_strip), per_sample is already masked
+            # above; apply the same mask to the denominators so real/fake stay consistent.
+            dmask = data_dict.get('loss_mask', None)
+            if dmask is not None:
+                w_real = ((1.0 - y_soft) * dmask).sum().clamp(min=1)
+                w_fake = (y_soft * dmask).sum().clamp(min=1)
+            else:
+                w_real = (1.0 - y_soft).sum().clamp(min=1)
+                w_fake = y_soft.sum().clamp(min=1)
             loss_real = (per_sample * (1.0 - y_soft)).sum() / w_real
             loss_fake = (per_sample * y_soft).sum() / w_fake
         else:
