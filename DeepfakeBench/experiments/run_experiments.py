@@ -1,12 +1,15 @@
 """
-Unified experiment runner — 12-config pyramid mixup matrix.
+Unified experiment runner — 16-config pyramid + trajectory mixup matrix.
 
-All experiments use: BalanceBatchSampler v1 (real_ratio=0.30),
-mixup_alpha=5.0, mixup_gamma=1.0, lap_num_levels=3, n_epochs=10.
+G1–G5 use the pyramid mixup family; G6 is the Diffusion Trajectory Mixup
+(DTP-Mixup) 2×2 ablation (trajectory × pyramid).  All experiments share:
+BalanceBatchSampler v1 (real_ratio=0.30), mixup_alpha=5.0,
+mixup_gamma=1.0, lap_num_levels=3, n_epochs=10.
 
 Usage:
-    python3 experiments/run_experiments.py                          # all 12
+    python3 experiments/run_experiments.py                          # all 16
     python3 experiments/run_experiments.py --groups G1 G3           # specific
+    python3 experiments/run_experiments.py --groups G6              # trajectory ablation
 """
 import os
 import sys
@@ -53,6 +56,17 @@ EXPERIMENTS = [
     # ── G5: RR+FF pyramid (on strip-RF basis) ──────────────────────────────
     {'group': 'G5', 'name': 'g1_rf_stripped',      'mode': 'lap_pyramid_all',  'strip': True},
     {'group': 'G5', 'name': 'g2_rf_not_generated', 'mode': 'lap_pyramid_rrff', 'strip': False},
+
+    # ── G6: Diffusion Trajectory Mixup (2×2 trajectory × pyramid) ──────────
+    # real_ratio=0.30 (same as G1–G5) → pyramid_only is the direct对照 anchor
+    # to G4_exp1_soft_ce (identical mode/hyperparams), so trajectory_pyramid
+    # is directly comparable to the whole G1–G5 matrix.
+    {'group': 'G6', 'name': 'baseline',           'mode': 'original',           'use_mixup': False, 'strip': False},
+    {'group': 'G6', 'name': 'pyramid_only',       'mode': 'lap_pyramid',        'use_mixup': True,  'strip': False},
+    {'group': 'G6', 'name': 'trajectory_only',    'mode': 'trajectory',         'use_mixup': True,  'strip': False,
+     'traj_t_min': 50, 'traj_t_max': 700, 'traj_T': 1000},
+    {'group': 'G6', 'name': 'trajectory_pyramid', 'mode': 'trajectory_pyramid', 'use_mixup': True,  'strip': False,
+     'traj_t_min': 50, 'traj_t_max': 700, 'traj_T': 1000},
 ]
 
 
@@ -63,15 +77,19 @@ def run_one(exp, args):
     os.makedirs(output_dir, exist_ok=True)
 
     exp_alpha = exp.get('alpha', args.alpha)
+    exp_use_mixup = exp.get('use_mixup', True)
+    traj_kwargs = {k: exp[k] for k in ('traj_t_min', 'traj_t_max', 'traj_T') if k in exp}
 
     log_dir = os.path.join(args.output_dir, 'logs', exp['group'], exp['name'])
     config = build_config(
         pyramid_mode=exp['mode'],
+        use_mixup=exp_use_mixup,
         mixup_loss_strip=exp['strip'],
         mixup_alpha=exp_alpha, mixup_gamma=args.gamma,
         mixup_beta_b=exp.get('beta_b'), mixup_beta_flip=exp.get('beta_flip', False),
         lap_num_levels=args.num_levels,
         sampler_real_ratio=args.sampler_real_ratio,
+        **traj_kwargs,
         log_dir=log_dir,
         train_dataset=TRAIN_DS, test_dataset=VAL_DS,
         n_epochs=args.n_epochs,
@@ -85,11 +103,14 @@ def run_one(exp, args):
 
     # Eval
     config_eval = build_config(
-        pyramid_mode=exp['mode'], mixup_loss_strip=exp['strip'],
+        pyramid_mode=exp['mode'],
+        use_mixup=exp_use_mixup,
+        mixup_loss_strip=exp['strip'],
         mixup_alpha=exp_alpha,
         mixup_beta_b=exp.get('beta_b'), mixup_beta_flip=exp.get('beta_flip', False),
         lap_num_levels=args.num_levels,
         sampler_real_ratio=args.sampler_real_ratio,
+        **traj_kwargs,
         n_epochs=0, train_dataset=TRAIN_DS, test_dataset=TEST_DS,
         for_training=False,
     )

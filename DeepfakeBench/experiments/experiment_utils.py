@@ -39,11 +39,13 @@ TEST_YAML   = os.path.join(_training_dir, 'config', 'test_config.yaml')
 # ── Config helpers ─────────────────────────────────────────────────────────
 
 def build_config(pyramid_mode='lap_pyramid',
+                 use_mixup=True,
                  mixup_loss_strip=False,
                  mixup_alpha=5.0, mixup_gamma=1.0,
                  mixup_beta_b=None, mixup_beta_flip=False,
                  lap_num_levels=3,
                  sampler_real_ratio=0.30,
+                 traj_t_min=None, traj_t_max=None, traj_T=None,
                  log_dir=None,
                  train_dataset=None, test_dataset=None,
                  n_epochs=10, for_training=True):
@@ -57,7 +59,7 @@ def build_config(pyramid_mode='lap_pyramid',
     if os.path.isdir(json_folder):
         config['dataset_json_folder'] = json_folder
 
-    config['use_mixup'] = True
+    config['use_mixup'] = use_mixup
     config['mixup_mode'] = pyramid_mode
     config['mixup_alpha'] = mixup_alpha
     config['mixup_gamma'] = mixup_gamma
@@ -67,6 +69,12 @@ def build_config(pyramid_mode='lap_pyramid',
     if mixup_beta_b is not None:
         config['mixup_beta_b'] = mixup_beta_b
     config['mixup_beta_flip'] = mixup_beta_flip
+    if traj_t_min is not None:
+        config['traj_t_min'] = traj_t_min
+    if traj_t_max is not None:
+        config['traj_t_max'] = traj_t_max
+    if traj_T is not None:
+        config['traj_T'] = traj_T
 
     config['balance_sampler_v2'] = False
     config['use_balance_batch_sampler'] = True
