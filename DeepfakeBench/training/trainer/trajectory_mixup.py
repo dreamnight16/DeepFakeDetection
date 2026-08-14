@@ -277,7 +277,7 @@ def pyramid_trajectory_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
         alpha:      unused (API consistency)
         gamma:      unused (API consistency)
         num_levels: K = number of Laplacian pyramid levels
-        omega:      level weights [K+1]; default = decreasing
+        omega:      level weights [K+1]; default = uniform
         epsilon:    numerical stability
         t_min:      minimum timestep (default 50)
         t_max:      maximum timestep (default 700)
@@ -296,12 +296,13 @@ def pyramid_trajectory_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     device = x.device
     scheduler = _get_scheduler(device)
 
-    # ── Default omega: K Laplacian + 1 Gaussian base ─────────────────────
+    # ── Default omega: K Laplacian + 1 Gaussian base, UNIFORM ───────────
+    # Uniform so the fully-real base (λ_{t,K}=1) gets equal weight with the
+    # K Laplacian levels — otherwise the label collapses to ~0.5 (real-biased
+    # structure underweighted). See sanity_check_trajectory.py Check 2.
     n_total = num_levels + 1
     if omega is None:
-        omega_raw = [float(n_total - i) for i in range(n_total)]
-        s = sum(omega_raw)
-        omega = [w / s for w in omega_raw]
+        omega = [1.0 / n_total] * n_total
     elif len(omega) == num_levels:
         omega_base = omega[-1] * 0.5 if omega else 1.0 / n_total
         s = sum(omega) + omega_base

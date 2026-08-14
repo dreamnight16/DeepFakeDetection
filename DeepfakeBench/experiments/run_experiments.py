@@ -61,6 +61,9 @@ EXPERIMENTS = [
     # real_ratio=0.30 (same as G1–G5) → pyramid_only is the direct对照 anchor
     # to G4_exp1_soft_ce (identical mode/hyperparams), so trajectory_pyramid
     # is directly comparable to the whole G1–G5 matrix.
+    # Re-run under a fresh namespace — do NOT mix with the old buggy sweep:
+    #   python3 experiments/run_experiments.py --groups G6 \
+    #       --output_dir ./experiment_results/trajectory_mixup_sweep_v2_correct
     {'group': 'G6', 'name': 'baseline',           'mode': 'original',           'use_mixup': False, 'strip': False},
     {'group': 'G6', 'name': 'pyramid_only',       'mode': 'lap_pyramid',        'use_mixup': True,  'strip': False},
     {'group': 'G6', 'name': 'trajectory_only',    'mode': 'trajectory',         'use_mixup': True,  'strip': False,
