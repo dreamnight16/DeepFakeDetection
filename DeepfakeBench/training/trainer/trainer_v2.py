@@ -629,6 +629,133 @@ def lap_pyramid_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
     return mixed_x, mixed_y, mixed_label, loss_mask
 
 
+def lap_pyramid_rf_only_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
+                              omega=None, epsilon=1e-8):
+    """Laplacian-pyramid mixup for RF pairs only; RR/FF pass through unmixed (G8).
+
+    Identical to lap_pyramid_mixup except same-class pairs are NOT mixed:
+    RR/FF samples keep their original anchor image and hard label. Only
+    real+fake pairs get the Laplacian-pyramid treatment (coarse G_K from the
+    real anchor, mixed residual bands, soft label ỹ = 1 − (1−e_f)^γ).
+
+    Returns:
+        mixed_x:     [N, C, H, W]  (RR/FF unchanged, RF mixed)
+        mixed_y:     [N] soft labels (0/1 for RR/FF, e_f-based for RF)
+        mixed_label: [N] hard labels
+        loss_mask:   [N] ones
+    """
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+
+    index = torch.randperm(x.size(0), device=x.device)
+    y_a = y.float()
+    y_b = y[index].float()
+
+    # ── Pair-type masks ───────────────────────────────────────────────────
+    rr_mask = (y_a == 0) & (y_b == 0)   # real+real → identity
+    ff_mask = (y_a == 1) & (y_b == 1)   # fake+fake → identity
+    rf_mask = (y_a == 0) & (y_b == 1)   # real+fake → Laplacian pyramid
+    fr_mask = (y_a == 1) & (y_b == 0)   # fake+real → merged into rf
+
+    # ── rr / ff: no mixing, keep original anchor image ─────────────────────
+    rr_x = x[rr_mask]
+    ff_x = x[ff_mask]
+
+    # ── rf: all real-fake pairs (fr merged, real-based) ────────────────────
+    rf_idx = rf_mask.nonzero(as_tuple=True)[0]
+    fr_idx = fr_mask.nonzero(as_tuple=True)[0]
+    real_pos = torch.cat([rf_idx, index[fr_idx]])
+    fake_pos = torch.cat([index[rf_idx], fr_idx])
+    n_rf = len(real_pos)
+    if n_rf > 0:
+        x_r = x[real_pos]              # anchor: real
+        x_f = x[fake_pos]              # partner: fake
+
+        # Gaussian pyramids
+        gpyr_r = build_gaussian_pyramid(x_r, num_levels)
+        gpyr_f = build_gaussian_pyramid(x_f, num_levels)
+
+        # Coarse structure kept from real
+        G_K = gpyr_r[-1]
+
+        # Laplacian pyramids
+        lap_r = build_laplacian_pyramid(gpyr_r)
+        lap_f = build_laplacian_pyramid(gpyr_f)
+
+        # Fake injection strength  q = 1 − λ  (fake proportion in mix)
+        q_val = 1.0 - lam
+
+        # Default importance weights: ω₀ > ω₁ > ω₂ > …  (finer → higher)
+        if omega is None:
+            omega = [float(num_levels - i) for i in range(num_levels)]
+            s = sum(omega)
+            omega = [w / s for w in omega]
+
+        # Mix Laplacian residuals level-by-level and accumulate e_f terms
+        lap_mixed = []
+        num_terms = []
+        den_terms = []
+
+        for k in range(num_levels):
+            L_r = lap_r[k]
+            L_f = lap_f[k]
+
+            # Mixed residual band
+            L_mix = (1.0 - q_val) * L_r + q_val * L_f
+            lap_mixed.append(L_mix)
+
+            # Per-sample residual energies  [n_rf]
+            E_r = (L_r ** 2).reshape(n_rf, -1).sum(dim=1)
+            E_f = (L_f ** 2).reshape(n_rf, -1).sum(dim=1)
+
+            w_k = omega[k]
+            num_terms.append(w_k * (q_val ** 2) * E_f)
+            den_terms.append(w_k * ((1.0 - q_val) ** 2 * E_r + (q_val ** 2) * E_f))
+
+        # Fake evidence  e_f ∈ [0, 1]
+        e_f = sum(num_terms) / (sum(den_terms) + epsilon)      # [n_rf]
+
+        # Reconstruct mixed image from coarse (real) + mixed residuals
+        rf_x = reconstruct_from_lap(G_K, lap_mixed)
+        # Clamp to real anchor's value range (suppress reconstruction artefacts)
+        rf_x = torch.clamp(rf_x,
+                           x_r.amin(dim=(-3, -2, -1), keepdim=True),
+                           x_r.amax(dim=(-3, -2, -1), keepdim=True))
+
+        # Soft label  ỹ = 1 − (1 − e_f)^γ
+        rf_y = 1.0 - (1.0 - e_f) ** gamma
+    else:
+        rf_x = torch.empty(0, *x.shape[1:], device=x.device)
+        rf_y = torch.empty(0, device=x.device)
+
+    # ── Combine: unchanged RR/FF + mixed RF ────────────────────────────────
+    parts_x = [t for t in [rr_x, ff_x, rf_x] if t.numel() > 0]
+    mixed_x = torch.cat(parts_x, dim=0)
+
+    n_rr = rr_mask.sum().item()
+    n_ff = ff_mask.sum().item()
+    soft_parts = []
+    if n_rr > 0:
+        soft_parts.append(torch.zeros(n_rr, device=x.device))
+    if n_ff > 0:
+        soft_parts.append(torch.ones(n_ff, device=x.device))
+    if n_rf > 0:
+        soft_parts.append(rf_y)
+    mixed_y = torch.cat(soft_parts, dim=0) if soft_parts else y.float()[:0]
+
+    label_parts = []
+    if n_rr > 0:
+        label_parts.append(torch.zeros(n_rr, dtype=y.dtype, device=x.device))
+    if n_ff > 0:
+        label_parts.append(torch.ones(n_ff, dtype=y.dtype, device=x.device))
+    if n_rf > 0:
+        label_parts.append(torch.zeros(n_rf, dtype=y.dtype, device=x.device))
+    mixed_label = torch.cat(label_parts, dim=0) if label_parts else y[:0]
+
+    loss_mask = torch.ones(mixed_x.size(0), device=x.device, dtype=torch.float32)
+
+    return mixed_x, mixed_y, mixed_label, loss_mask
+
+
 def rf_pair_mixup(x, y, alpha=1.0, gamma=5.0, num_levels=3,
                    omega=None, epsilon=1e-8):
     """RF-only Laplacian pyramid mixup for interleaved batches (v2 sampler).
@@ -1243,6 +1370,13 @@ class Trainer(object):
                 losses = self.model.module.get_losses(data_dict, predictions)
             else:
                 losses = self.model.get_losses(data_dict, predictions)
+            # ── Ordinal ranking loss (G9): extra forward on the generated RF
+            #    pixel-mix pairs, added to overall before backward ─────────
+            if 'rank_xa' in data_dict:
+                rank_loss = self._compute_rank_loss(data_dict)
+                if rank_loss is not None:
+                    losses['rank_loss'] = rank_loss
+                    losses['overall'] = losses['overall'] + rank_loss
             # self.optimizer.zero_grad()
             # losses['overall'].backward()
             # #self.model.module.set_mask_grad()
@@ -1264,6 +1398,32 @@ class Trainer(object):
 
 
             return losses,predictions
+
+
+    def _compute_rank_loss(self, data_dict):
+        """G9: ordinal forensic ranking loss on generated RF pixel-mix pairs.
+
+        Forwards the 2·n_real mixed images (x_λa, x_λb) through the model and
+        penalises s(x_λb) < s(x_λa) + m·(λ_b − λ_a) on the fake-class logit
+        (pre-softmax, per the spec). Returns the weighted scalar loss, or
+        None when no pairs were generated.
+        """
+        xa = data_dict['rank_xa']
+        xb = data_dict['rank_xb']
+        n = xa.size(0)
+        if n == 0:
+            return None
+        from trainer.ordinal_rank_mixup import ordinal_ranking_loss
+        pred_rank = self.model({'image': torch.cat([xa, xb], dim=0)})
+        cls = pred_rank['cls']                 # [2n, 2] pre-softmax logits
+        raw = ordinal_ranking_loss(
+            cls[:n, 1], cls[n:, 1],
+            data_dict['rank_la'], data_dict['rank_lb'],
+            margin=self.config.get('rank_margin', 1.0),
+            softplus=self.config.get('rank_softplus', False),
+        )
+        weight = self.config.get('rank_loss_weight', 1.0)
+        return weight * raw
 
 
     def train_epoch(
@@ -1333,6 +1493,14 @@ class Trainer(object):
                 elif mixup_mode == 'lap_pyramid':
                     data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
                         lap_pyramid_mixup(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                        )
+                # ── RF-only pyramid mixup (G8): no RR/FF mixing ──
+                elif mixup_mode == 'lap_pyramid_rf_only':
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
+                        lap_pyramid_rf_only_mixup(
                             data_dict['image'], data_dict['label'],
                             alpha=alpha, gamma=gamma,
                             num_levels=self.config.get('lap_num_levels', 3),
@@ -1410,6 +1578,130 @@ class Trainer(object):
                         data_dict['image'].size(0),
                         device=data_dict['image'].device,
                         dtype=torch.float32)
+                elif mixup_mode == 'artifact_amp':
+                    from trainer.artifact_amp_mixup import artifact_amp_mixup
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
+                        artifact_amp_mixup(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                            num_levels=self.config.get('lap_num_levels', 3),
+                            amp_max=self.config.get('amp_max', 1.0),
+                        )
+                elif mixup_mode == 'pixel_label0':
+                    from trainer.pixel_mixup_label0 import pixel_mixup_label0
+                    data_dict['image'], data_dict['label_soft'], data_dict['label'], data_dict['loss_mask'] = \
+                        pixel_mixup_label0(
+                            data_dict['image'], data_dict['label'],
+                            alpha=alpha, gamma=gamma,
+                        )
+                # ── G9: base batch unchanged (hard CE) + ordinal ranking loss ─
+                # No label_soft is set, so the original samples keep their
+                # normal hard-label CE. Additionally, 2·n_real RF pixel-mixes
+                # (λ_a < λ_b per real anchor) are generated and stored in
+                # data_dict['rank_*']; train_step forwards them and adds the
+                # ordinal ranking loss to losses['overall'].
+                elif mixup_mode == 'ordinal_rank':
+                    from trainer.ordinal_rank_mixup import build_ordinal_rank_pairs
+                    rank = build_ordinal_rank_pairs(
+                        data_dict['image'], data_dict['label'],
+                        alpha=self.config.get('rank_alpha', alpha),
+                    )
+                    if rank is not None:
+                        data_dict.update(rank)
+                # ── G10: HiMix replica — clean base batch + appended RF pixel
+                #    mixes (λ~Beta(α,α) per pair, α=0.1) hard-labeled fake ──
+                elif mixup_mode == 'pixel_rf_hardfake':
+                    from trainer.pixel_rf_hardfake import build_pixel_rf_hardfake
+                    extra = build_pixel_rf_hardfake(
+                        data_dict['image'], data_dict['label'], alpha=alpha)
+                    if extra is not None:
+                        base_label = data_dict['label']          # original [N]
+                        base_soft = base_label.float()           # [N]
+                        data_dict['image'] = torch.cat(
+                            [data_dict['image'], extra['image']], dim=0)
+                        data_dict['label'] = torch.cat(
+                            [base_label, extra['label']], dim=0)
+                        data_dict['label_soft'] = torch.cat(
+                            [base_soft, extra['label_soft']], dim=0)
+                        data_dict['loss_mask'] = torch.ones(
+                            data_dict['image'].size(0), device=data_dict['image'].device,
+                            dtype=torch.float32)
+                # ── G10-pyramid: HiMix MDA + Laplacian pyramid mixing ──────
+                # Same append/hard-fake/α=0.1 recipe as pixel_rf_hardfake, but
+                # the real+fake mixes are built with the project's Laplacian
+                # pyramid (real coarse structure preserved, residual bands
+                # blended) instead of naive pixel interpolation.
+                elif mixup_mode == 'pyramid_rf_hardfake':
+                    from trainer.pyramid_rf_hardfake import build_pyramid_rf_hardfake
+                    extra = build_pyramid_rf_hardfake(
+                        data_dict['image'], data_dict['label'], alpha=alpha,
+                        num_levels=self.config.get('lap_num_levels', 3))
+                    if extra is not None:
+                        base_label = data_dict['label']          # original [N]
+                        base_soft = base_label.float()           # [N]
+                        data_dict['image'] = torch.cat(
+                            [data_dict['image'], extra['image']], dim=0)
+                        data_dict['label'] = torch.cat(
+                            [base_label, extra['label']], dim=0)
+                        data_dict['label_soft'] = torch.cat(
+                            [base_soft, extra['label_soft']], dim=0)
+                        data_dict['loss_mask'] = torch.ones(
+                            data_dict['image'].size(0), device=data_dict['image'].device,
+                            dtype=torch.float32)
+                # ── G11-1: RF pixel mixes hard-labeled real (0) ─────────────
+                elif mixup_mode == 'pixel_rf_label0':
+                    from trainer.pixel_rf_label0 import build_pixel_rf_label0
+                    extra = build_pixel_rf_label0(
+                        data_dict['image'], data_dict['label'], alpha=alpha)
+                    if extra is not None:
+                        base_label = data_dict['label']          # original [N]
+                        base_soft = base_label.float()           # [N]
+                        data_dict['image'] = torch.cat(
+                            [data_dict['image'], extra['image']], dim=0)
+                        data_dict['label'] = torch.cat(
+                            [base_label, extra['label']], dim=0)
+                        data_dict['label_soft'] = torch.cat(
+                            [base_soft, extra['label_soft']], dim=0)
+                        data_dict['loss_mask'] = torch.ones(
+                            data_dict['image'].size(0), device=data_dict['image'].device,
+                            dtype=torch.float32)
+                # ── G11-3: RF pyramid mixes with soft energy label ──────────
+                elif mixup_mode == 'pyramid_rf_soft':
+                    from trainer.pyramid_rf_soft import build_pyramid_rf_soft
+                    extra = build_pyramid_rf_soft(
+                        data_dict['image'], data_dict['label'],
+                        alpha=alpha, gamma=gamma,
+                        num_levels=self.config.get('lap_num_levels', 3))
+                    if extra is not None:
+                        base_label = data_dict['label']          # original [N]
+                        base_soft = base_label.float()           # [N]
+                        data_dict['image'] = torch.cat(
+                            [data_dict['image'], extra['image']], dim=0)
+                        data_dict['label'] = torch.cat(
+                            [base_label, extra['label']], dim=0)
+                        data_dict['label_soft'] = torch.cat(
+                            [base_soft, extra['label_soft']], dim=0)
+                        data_dict['loss_mask'] = torch.ones(
+                            data_dict['image'].size(0), device=data_dict['image'].device,
+                            dtype=torch.float32)
+                # ── G11-4: RF pyramid mixes hard-labeled real (0) ───────────
+                elif mixup_mode == 'pyramid_rf_label0':
+                    from trainer.pyramid_rf_label0 import build_pyramid_rf_label0
+                    extra = build_pyramid_rf_label0(
+                        data_dict['image'], data_dict['label'], alpha=alpha,
+                        num_levels=self.config.get('lap_num_levels', 3))
+                    if extra is not None:
+                        base_label = data_dict['label']          # original [N]
+                        base_soft = base_label.float()           # [N]
+                        data_dict['image'] = torch.cat(
+                            [data_dict['image'], extra['image']], dim=0)
+                        data_dict['label'] = torch.cat(
+                            [base_label, extra['label']], dim=0)
+                        data_dict['label_soft'] = torch.cat(
+                            [base_soft, extra['label_soft']], dim=0)
+                        data_dict['loss_mask'] = torch.ones(
+                            data_dict['image'].size(0), device=data_dict['image'].device,
+                            dtype=torch.float32)
                 else:
                     mixup_k = self.config.get('mixup_k', 1)
                     data_dict = hardest_k_mixup(

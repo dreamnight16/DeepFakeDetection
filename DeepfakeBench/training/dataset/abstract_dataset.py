@@ -30,6 +30,7 @@ from torchvision import transforms as T
 import albumentations as A
 
 from dataset.albu import IsotropicResize
+from dataset.utils.freq_band import apply_freq_band, apply_residual
 
 FFpp_pool=['FaceForensics++','FaceShifter','DeepFakeDetection','FF-DF','FF-F2F','FF-FS','FF-NT']#
 
@@ -531,6 +532,35 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
                 return self.__getitem__(index_random)
             image = np.array(image)  # Convert to numpy array for data augmentation
 
+            # ── G13: data-side frequency-band isolation (pre-augment path) ───
+            # Keeps only one radial FFT band of the image, reconstructed to RGB.
+            # The model / training / augmentation pipeline is left untouched —
+            # only the input transform differs, so RGB vs Low vs Mid-Low vs
+            # Mid-High vs High is a clean single-variable frequency ablation.
+            freq_band = self.config.get('freq_ablation', None)
+            freq_norm = self.config.get('freq_norm', 'minmax')
+            freq_energy_match = bool(self.config.get('freq_energy_match', False))
+            freq_after_aug = bool(self.config.get('freq_after_aug', True))
+            # ── G17-2: data-side real-noise residual isolation ───────────────
+            # Same discipline as freq_ablation (observer untouched, only the
+            # input transform changes).  residual_ablation is mutually exclusive
+            # with freq_ablation (a single deterministic input map per sample).
+            res_ablation = self.config.get('residual_ablation', None)
+            res_sigma = float(self.config.get('residual_sigma', 2.0))
+            res_alpha = float(self.config.get('residual_alpha', 4.0))
+            res_r0 = float(self.config.get('residual_fft_r0', 0.65))
+            res_shuffle = bool(self.config.get('residual_shuffle', False))
+            has_transform = (freq_band is not None) or (res_ablation is not None)
+            filter_before_aug = has_transform and (not freq_after_aug)
+            if filter_before_aug:
+                if res_ablation is not None:
+                    image = apply_residual(image, mode=res_ablation,
+                                           sigma=res_sigma, alpha=res_alpha,
+                                           r0=res_r0, shuffle=res_shuffle)
+                else:
+                    image = apply_freq_band(image, freq_band, norm=freq_norm,
+                                            energy_match=freq_energy_match)
+
             # Load mask and landmark (if needed)
             if self.mode=='train' and self.config['with_mask']:
                 mask = self.load_mask(mask_path)
@@ -556,6 +586,24 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
             else:
                 image_trans, landmarks_trans, mask_trans = deepcopy(image), deepcopy(landmarks), deepcopy(mask)
 
+
+            # ── G13: data-side frequency-band isolation (post-augment path) ──
+            # Default (freq_after_aug=True): filter AFTER augmentation so the
+            # model's input is strictly limited to the target band — no
+            # out-of-band content leaks back in via augmentation (CLAHE / noise /
+            # blur / sharpening re-introduce high frequencies).  This is the
+            # rigorous choice for an ablation that asks "does band X carry the
+            # discriminative signal".  Multi-crop (if enabled) crops the filtered
+            # image, so every crop stays in-band.
+            if has_transform and not filter_before_aug:
+                if res_ablation is not None:
+                    image_trans = apply_residual(image_trans, mode=res_ablation,
+                                                 sigma=res_sigma, alpha=res_alpha,
+                                                 r0=res_r0, shuffle=res_shuffle)
+                else:
+                    image_trans = apply_freq_band(image_trans, freq_band,
+                                                  norm=freq_norm,
+                                                  energy_match=freq_energy_match)
 
             # To tensor and normalize
             if self.multi_crop and self.mode=='test':

@@ -46,6 +46,20 @@ def build_config(pyramid_mode='lap_pyramid',
                  lap_num_levels=3,
                  sampler_real_ratio=0.30,
                  traj_t_min=None, traj_t_max=None, traj_T=None,
+                 rank_margin=None, rank_loss_weight=None,
+                 rank_softplus=None, rank_alpha=None,
+                 model_name='effort',
+                 aepa_mode=None, aepa_lambda_f=1.0, aepa_eps=1e-8,
+                 aepa_init_ckpt=None,
+                 max_evidence_lambda=1.0, max_evidence_eps=1e-8,
+                 max_evidence_init_ckpt=None, max_evidence_cls_feature='raw_token',
+                 freq_ablation=None, freq_norm='minmax', freq_energy_match=False,
+                 freq_after_aug=True,
+                 residual_ablation=None, residual_sigma=2.0, residual_alpha=4.0,
+                 residual_fft_r0=0.65, residual_shuffle=False,
+                 comp_freq_bands=None, comp_freq_norm='fixed_rms', comp_freq_rms=0.5,
+                 comp_fuse='gate', comp_gate_hidden=32,
+                 comp_lambda_freq=1.0, comp_lambda_max=1.0, comp_cls_feature='pooler_output',
                  log_dir=None,
                  train_dataset=None, test_dataset=None,
                  n_epochs=10, for_training=True):
@@ -59,8 +73,66 @@ def build_config(pyramid_mode='lap_pyramid',
     if os.path.isdir(json_folder):
         config['dataset_json_folder'] = json_folder
 
+    config['model_name'] = model_name
     config['use_mixup'] = use_mixup
     config['mixup_mode'] = pyramid_mode
+
+    # G13 (data-side frequency-band isolation): these keys are read by
+    # DeepfakeAbstractBaseDataset.__getitem__ and do NOT touch the model
+    # architecture.  They are set unconditionally so the dataset never sees a
+    # missing key.  freq_ablation=None (RGB baseline) skips filtering entirely.
+    config['freq_ablation'] = freq_ablation
+    config['freq_norm'] = freq_norm
+    config['freq_energy_match'] = freq_energy_match
+    config['freq_after_aug'] = freq_after_aug
+
+    # G17-2 (data-side real-noise evidence isolation): read by __getitem__ and
+    # do NOT touch the model architecture (the ``effort`` observer is unchanged —
+    # only the input differs).  Set unconditionally so the dataset never sees a
+    # missing key; residual_ablation=None (RGB baseline) leaves the input as-is.
+    config['residual_ablation'] = residual_ablation
+    config['residual_sigma'] = residual_sigma
+    config['residual_alpha'] = residual_alpha
+    config['residual_fft_r0'] = residual_fft_r0
+    config['residual_shuffle'] = residual_shuffle
+
+    # AEPA (G12) has no mixup: its patch-level asymmetric loss replaces the
+    # CLS readout entirely.  Force mixup off so the trainer skips augmentation.
+    if model_name == 'effort_aepa':
+        config['use_mixup'] = False
+        config['mixup_mode'] = 'none'
+        if aepa_mode is not None:
+            config['aepa_mode'] = aepa_mode
+        config['aepa_lambda_f'] = aepa_lambda_f
+        config['aepa_eps'] = aepa_eps
+        if aepa_init_ckpt is not None:
+            config['aepa_init_ckpt'] = aepa_init_ckpt
+
+    # Max-fake-evidence selection loss (G15) also has no mixup: it keeps the
+    # CLS branch and adds a patch-level local loss (L_cls + lambda_max * L_max).
+    if model_name == 'effort_maxev':
+        config['use_mixup'] = False
+        config['mixup_mode'] = 'none'
+        config['max_evidence_lambda'] = max_evidence_lambda
+        config['max_evidence_eps'] = max_evidence_eps
+        config['max_evidence_cls_feature'] = max_evidence_cls_feature
+        if max_evidence_init_ckpt is not None:
+            config['max_evidence_init_ckpt'] = max_evidence_init_ckpt
+
+    # G17-1 (model-side dual-line gated fusion) also has no mixup: the two lines
+    # already share a frozen backbone and adding global mixup would smear the
+    # per-line evidence heads.  Force it off so the trainer skips augmentation.
+    if model_name == 'effort_dualcomp':
+        config['use_mixup'] = False
+        config['mixup_mode'] = 'none'
+        config['comp_freq_bands'] = comp_freq_bands if comp_freq_bands else ['low']
+        config['comp_freq_norm'] = comp_freq_norm
+        config['comp_freq_rms'] = comp_freq_rms
+        config['comp_fuse'] = comp_fuse
+        config['comp_gate_hidden'] = comp_gate_hidden
+        config['comp_lambda_freq'] = comp_lambda_freq
+        config['comp_lambda_max'] = comp_lambda_max
+        config['comp_cls_feature'] = comp_cls_feature
     config['mixup_alpha'] = mixup_alpha
     config['mixup_gamma'] = mixup_gamma
     config['mix_domain'] = 'rgb'
@@ -75,6 +147,14 @@ def build_config(pyramid_mode='lap_pyramid',
         config['traj_t_max'] = traj_t_max
     if traj_T is not None:
         config['traj_T'] = traj_T
+    if rank_margin is not None:
+        config['rank_margin'] = rank_margin
+    if rank_loss_weight is not None:
+        config['rank_loss_weight'] = rank_loss_weight
+    if rank_softplus is not None:
+        config['rank_softplus'] = rank_softplus
+    if rank_alpha is not None:
+        config['rank_alpha'] = rank_alpha
 
     config['balance_sampler_v2'] = False
     config['use_balance_batch_sampler'] = True
@@ -133,14 +213,23 @@ def train_model(config, train_dataset, val_dataset):
 
 # ── testall.py evaluation (subprocess) ─────────────────────────────────────
 
-def run_testall(ckpt_path, test_datasets, log_path):
-    """Run testall.py on checkpoint; return per-dataset metrics dict."""
+def run_testall(ckpt_path, test_datasets, log_path, extra_config=None):
+    """Run testall.py on checkpoint; return per-dataset metrics dict.
+
+    extra_config: optional dict of model-architecture config keys (e.g.
+    use_freq_split / freq_split_pool) that are not present in the detector YAML
+    but change the model structure. Merged into the test config so test.py
+    rebuilds the model identically to training (else strict checkpoint loading
+    fails with unexpected keys like 'stem.weight').
+    """
     testall_py = os.path.join(_deepfake_dir, 'testall.py')
     TMP = tempfile.mkstemp(suffix='.yaml', prefix='effort_testall_')[1]
     with open(DETECTOR_YAML, 'r') as f:
         yc = yaml.safe_load(f)
     with open(TEST_YAML, 'r') as f:
         yc.update(yaml.safe_load(f))
+    if extra_config:
+        yc.update(extra_config)
     json_folder = os.path.join(_deepfake_dir, 'preprocessing', 'dataset_json')
     if os.path.isdir(json_folder):
         yc['dataset_json_folder'] = json_folder
@@ -254,7 +343,30 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
 
     # testall
     testall_log = os.path.join(output_dir, 'testall.log')
-    testall_metrics = run_testall(ckpt_path, test_datasets, testall_log)
+    # Pass model-architecture + data-side keys that are not in the detector
+    # YAML so test.py rebuilds both the model and the dataset identically
+    # (e.g. use_freq_split adds a stem layer, effort_aepa changes the model
+    # class and adds patch/evidence heads, effort_maxev reads
+    # max_evidence_cls_feature to pick the CLS-branch input (raw_token vs
+    # pooler_output), freq_ablation makes __getitem__ band-pass the input).
+    # max_evidence_init_ckpt is deliberately NOT propagated: it is only used to
+    # seed the patch head in __init__ and is overwritten by the checkpoint's own
+    # patch_head on strict load, so carrying it would just re-torch.load at test.
+    arch_keys = ('use_freq_split', 'freq_split_pool', 'model_name',
+                 'aepa_mode', 'aepa_lambda_f', 'aepa_eps',
+                 'max_evidence_cls_feature', 'max_evidence_lambda', 'max_evidence_eps',
+                 'freq_ablation', 'freq_norm', 'freq_energy_match', 'freq_after_aug',
+                 # G17-2 data-side residual keys (dataset-only, carried so test
+                 # rebuilds the residual input identically to training).
+                 'residual_ablation', 'residual_sigma', 'residual_alpha',
+                 'residual_fft_r0', 'residual_shuffle',
+                 # G17-1 model-side dual-line gated-fusion structural keys.
+                 'comp_freq_bands', 'comp_freq_norm', 'comp_freq_rms', 'comp_fuse',
+                 'comp_gate_hidden', 'comp_lambda_freq', 'comp_lambda_max',
+                 'comp_cls_feature')
+    extra_config = {k: config[k] for k in arch_keys if k in config}
+    testall_metrics = run_testall(ckpt_path, test_datasets, testall_log,
+                                  extra_config=extra_config)
 
     del model
     torch.cuda.empty_cache()
@@ -274,6 +386,19 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
         m = compute_metrics(test_probs[ds], test_labels[ds])
         summary['test_acc'][ds] = m['acc']
     summary['test_acc_avg'] = float(np.mean(list(summary['test_acc'].values())))
+
+    # Score mean/std per set (G13: record more than AUC — these reveal whether a
+    # band's lower AUC comes from a collapsed/reversed score spread or a genuine
+    # separation gap).
+    if len(train_probs) > 0:
+        summary['train_score'] = {'mean': float(train_probs.mean()),
+                                  'std': float(train_probs.std())}
+    else:
+        summary['train_score'] = {'mean': None, 'std': None}
+    summary['test_score'] = {}
+    for ds in test_datasets:
+        p = test_probs[ds]
+        summary['test_score'][ds] = {'mean': float(p.mean()), 'std': float(p.std())}
     return summary
 
 
@@ -293,16 +418,19 @@ def print_results(exp_name, train_probs, train_labels,
         m = compute_metrics(train_probs, train_labels)
         print(f"\n  -- Train --\n  Acc: {m['acc']:.4f}")
         print(f"  CM: TN={m['tn']} FP={m['fp']} FN={m['fn']} TP={m['tp']}")
+        print(f"  Score mean/std: {train_probs.mean():.3f} ± {train_probs.std():.3f}")
         print(f"\n  -- Test Sets --")
         print(f"  {'Dataset':<25s} | {'Acc':>8s} | {'TN':>6s} | {'FP':>6s} | {'FN':>6s} | {'TP':>6s}")
         print(f"  {'-'*25} | {'-'*8} | {'-'*6} | {'-'*6} | {'-'*6} | {'-'*6}")
     all_acc, total_tn, total_fp, total_fn, total_tp = [], 0, 0, 0, 0
     for ds in sorted(test_probs_dict.keys()):
-        m = compute_metrics(test_probs_dict[ds], test_labels_dict[ds])
+        p = test_probs_dict[ds]
+        m = compute_metrics(p, test_labels_dict[ds])
         all_acc.append(m['acc'])
         total_tn += m['tn']; total_fp += m['fp']
         total_fn += m['fn']; total_tp += m['tp']
         print(f"  {ds:<25s} | {m['acc']:8.4f} | {m['tn']:6d} | {m['fp']:6d} | {m['fn']:6d} | {m['tp']:6d}")
+        print(f"  {'':<25s} |  score mean/std: {p.mean():.3f} ± {p.std():.3f}")
     if len(all_acc) > 1:
         print(f"  {'-'*25} | {'-'*8} | {'-'*6} | {'-'*6} | {'-'*6} | {'-'*6}")
         print(f"  {'average':<25s} | {np.mean(all_acc):8.4f} | {total_tn:6d} | {total_fp:6d} | {total_fn:6d} | {total_tp:6d}")

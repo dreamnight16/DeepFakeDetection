@@ -122,6 +122,21 @@ class EffortDetector(nn.Module):
             # learnable center c_R, normalized in loss; randn init puts it in feature space
             self.center = nn.Parameter(torch.randn(1024))
 
+        # --- Frequency-split input (structure + texture as extra channels) ---
+        # Decompose the (CLIP-normalized) image into low-freq structure and
+        # high-freq texture via a box filter; stack as extra input channels and
+        # project back to 3 channels for the frozen CLIP backbone. The stem is
+        # initialized to pass RGB through unchanged (identity) and ignore the
+        # frequency channels, so training starts exactly at the plain-RGB
+        # baseline and learns to use frequency only if it helps.
+        self.use_freq_split = config.get('use_freq_split', False) if config else False
+        self.freq_split_pool = int(config.get('freq_split_pool', 4)) if config else 4
+        if self.use_freq_split:
+            self.stem = nn.Conv2d(9, 3, kernel_size=1, bias=False)
+            nn.init.zeros_(self.stem.weight)
+            with torch.no_grad():
+                self.stem.weight.data[:, :3] = torch.eye(3).unsqueeze(-1).unsqueeze(-1)
+
     def build_backbone(self, config):
         # ⚠⚠⚠ Download CLIP model using the below link
         # https://drive.google.com/drive/folders/1fm3Jd8lFMiSP1qgdmsxfqlJZGpr_bXsx?usp=drive_link 
@@ -200,11 +215,21 @@ class EffortDetector(nn.Module):
         return best_th
 
     def features(self, data_dict: dict) -> torch.tensor:
-        feat = self.backbone(data_dict['image'])['pooler_output']
+        feat = self.backbone(self._prep_input(data_dict['image']))['pooler_output']
         return feat
 
     def classifier(self, features: torch.tensor) -> torch.tensor:
         return self.head(features)
+
+    def _prep_input(self, x):
+        """Optional frequency-split: stack [RGB, low-freq, high-freq] as channels."""
+        if not self.use_freq_split:
+            return x
+        p = self.freq_split_pool
+        low = F.interpolate(F.avg_pool2d(x, kernel_size=p, stride=p),
+                            size=x.shape[-2:], mode='bilinear', align_corners=False)
+        high = x - low
+        return self.stem(torch.cat([x, low, high], dim=1))
 
     def asymmetric_center_loss(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
@@ -333,7 +358,7 @@ class EffortDetector(nn.Module):
             b, n, c, h, w = images.shape
             # 将 Batch 和 Crops 维度合并进行特征提取
             flat_images = images.view(-1, c, h, w)
-            feats = self.backbone(flat_images)['pooler_output']  # [B*N, 1024]
+            feats = self.backbone(self._prep_input(flat_images))['pooler_output']  # [B*N, 1024]
             preds = self.classifier(feats)                        # [B*N, 2]
             probs = torch.softmax(preds, dim=1)[:, 1]            # [B*N]
             probs = probs.view(b, n)                              # [B, N]
