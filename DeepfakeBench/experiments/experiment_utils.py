@@ -53,11 +53,13 @@ def build_config(pyramid_mode='lap_pyramid',
                  aepa_init_ckpt=None,
                  max_evidence_lambda=1.0, max_evidence_eps=1e-8,
                  max_evidence_init_ckpt=None, max_evidence_cls_feature='raw_token',
+                 max_evidence_inference='cls',
                  freq_ablation=None, freq_norm='minmax', freq_energy_match=False,
                  freq_after_aug=True,
                  residual_ablation=None, residual_sigma=2.0, residual_alpha=4.0,
                  residual_fft_r0=0.65, residual_shuffle=False,
-                 comp_freq_bands=None, comp_freq_norm='fixed_rms', comp_freq_rms=0.5,
+                 comp_freq_bands=None, comp_freq_norm='train_rms', comp_freq_rms=0.5,
+                 comp_band_sigma=None,
                  comp_fuse='gate', comp_gate_hidden=32,
                  comp_lambda_freq=1.0, comp_lambda_max=1.0, comp_cls_feature='pooler_output',
                  log_dir=None,
@@ -116,6 +118,12 @@ def build_config(pyramid_mode='lap_pyramid',
         config['max_evidence_lambda'] = max_evidence_lambda
         config['max_evidence_eps'] = max_evidence_eps
         config['max_evidence_cls_feature'] = max_evidence_cls_feature
+        # Detection-time score rule (G15 supplement Strategy-3): 'cls' (CLS head
+        # alone, default §16) or 'avg' (0.5*P_cls + 0.5*max_i q_{i,1}, gated on
+        # inference=True).  Forward-time behaviour only (no weight-shape change),
+        # but carried through arch_keys so testall rebuilds the model with the
+        # SAME rule that training/eval intended.
+        config['max_evidence_inference'] = max_evidence_inference
         if max_evidence_init_ckpt is not None:
             config['max_evidence_init_ckpt'] = max_evidence_init_ckpt
 
@@ -133,6 +141,11 @@ def build_config(pyramid_mode='lap_pyramid',
         config['comp_lambda_freq'] = comp_lambda_freq
         config['comp_lambda_max'] = comp_lambda_max
         config['comp_cls_feature'] = comp_cls_feature
+        # Fixed per-band RMS scalars over the training set (G17-1 §2 train-set
+        # stats).  Non-weight, but MUST be carried so train/val/eval/testall all
+        # rebuild the F line with an identical normalisation (a silent per-image
+        # fallback would diverge the eval-time F view from training).
+        config['comp_band_sigma'] = comp_band_sigma
     config['mixup_alpha'] = mixup_alpha
     config['mixup_gamma'] = mixup_gamma
     config['mix_domain'] = 'rgb'
@@ -298,6 +311,43 @@ def get_train_loader(config):
                       collate_fn=ds.collate_fn)
 
 
+def compute_comp_band_sigma(config, bands, num_batches=4):
+    """Estimate the fixed per-band RMS scalars for the G17-1 model-side F line.
+
+    ``bands`` is the list of ``comp_freq_bands`` the dualcomp model forwards.  For
+    each band we average the per-image std of the band-passed reconstruction over
+    a few no-aug training batches, so the scalar is a train-set statistic (G17-1
+    §2: a fixed scalar, NOT per-image min-max or per-image re-scaling), which
+    preserves inter-image amplitude differences on the frequency line.
+
+    The images come from ``get_train_loader`` (CLIP-normalised, no augmentation)
+    so the F-line band view the model sees at train/val/eval is byte-identical to
+    the one calibrated here — the "三处一致" requirement.
+
+    Returns ``{band: float}``.  The caller passes this dict as ``comp_band_sigma``
+    into ``build_config`` so both the training and eval configs (and testall, via
+    ``arch_keys``) carry the SAME scalars.
+    """
+    bands = list(bands)
+    # Lazy import so this helper does not pull the detector module at import time.
+    from detectors.effort_detector_dualcomp import band_rms_scalar
+    loader = get_train_loader(config)
+    sums = {b: 0.0 for b in bands}
+    counts = {b: 0 for b in bands}
+    seen = 0
+    for data_dict in loader:
+        images = data_dict['image']
+        # band_rms_scalar returns {band: mean per-image std over this batch}.
+        for b, s in band_rms_scalar(images, bands).items():
+            sums[b] += s
+            counts[b] += 1
+        seen += 1
+        if seen >= num_batches:
+            break
+    sigma = {b: (sums[b] / counts[b]) if counts[b] else 0.5 for b in bands}
+    return sigma
+
+
 @torch.no_grad()
 def collect_predictions(model, data_loader):
     """Run model on data_loader; return (probs, labels) as numpy arrays."""
@@ -355,14 +405,15 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
     arch_keys = ('use_freq_split', 'freq_split_pool', 'model_name',
                  'aepa_mode', 'aepa_lambda_f', 'aepa_eps',
                  'max_evidence_cls_feature', 'max_evidence_lambda', 'max_evidence_eps',
+                 'max_evidence_inference',
                  'freq_ablation', 'freq_norm', 'freq_energy_match', 'freq_after_aug',
                  # G17-2 data-side residual keys (dataset-only, carried so test
                  # rebuilds the residual input identically to training).
                  'residual_ablation', 'residual_sigma', 'residual_alpha',
                  'residual_fft_r0', 'residual_shuffle',
                  # G17-1 model-side dual-line gated-fusion structural keys.
-                 'comp_freq_bands', 'comp_freq_norm', 'comp_freq_rms', 'comp_fuse',
-                 'comp_gate_hidden', 'comp_lambda_freq', 'comp_lambda_max',
+                 'comp_freq_bands', 'comp_freq_norm', 'comp_freq_rms', 'comp_band_sigma',
+                 'comp_fuse', 'comp_gate_hidden', 'comp_lambda_freq', 'comp_lambda_max',
                  'comp_cls_feature')
     extra_config = {k: config[k] for k in arch_keys if k in config}
     testall_metrics = run_testall(ckpt_path, test_datasets, testall_log,

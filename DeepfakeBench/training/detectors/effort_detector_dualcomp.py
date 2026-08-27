@@ -28,8 +28,13 @@ simplification: the gate under TTA runs on the RGB line only).
 Config keys (all MUST be added to ``experiment_utils.arch_keys`` so testall.py
 rebuilds the model identically, else strict checkpoint load fails):
     comp_freq_bands    : list[str]  band keys to forward on the F line (['low'])
-    comp_freq_norm     : 'fixed_rms' | 'none'  F-line view normalisation
-    comp_freq_rms      : float  fixed-RMS target for the F view (default 0.5)
+    comp_freq_norm     : 'train_rms' | 'fixed_rms' | 'none'  F-line normalisation
+    comp_freq_rms      : float  RMS target for the F view (default 0.5)
+    comp_band_sigma    : dict[str,float]  fixed per-band RMS scalars over the
+                          training set (train-set stats; the 'train_rms' divisor).
+                          Required for 'train_rms', NOT a weight (no strict-load
+                          impact) but MUST be carried through arch_keys so testall
+                          rebuilds the F view identically.
     comp_fuse          : 'gate' (learned) | 'equal' (fixed w=0.5, control)
     comp_gate_hidden   : int  gate MLP hidden width (default 32)
     comp_lambda_freq   : float  weight on the per-line CLS losses (default 1.0)
@@ -51,14 +56,51 @@ logger = logging.getLogger(__name__)
 
 # G17-1 frequency bands (subset of freq_band.FREQ_BANDS) — pre-registered Low
 # for the F line (G13's most-generalising band).  Only the radial *range* is used
-# by the in-detector FFT; the data-side reconstruction/normalisation discipline
-# of G13 applies to the G17-2 data-side arm, not to this model-side band view.
+# by the in-detector FFT; the model-side band view re-normalises with its own
+# fixed train-set RMS scalar (``comp_freq_norm='train_rms'``), whereas the G13
+# data-side ground-truth normalization discipline applies to the G17-2 arm.
 _FREQ_RANGES = {
     "low": (0.00, 0.15),
     "mid_low": (0.15, 0.35),
     "mid_high": (0.35, 0.65),
     "high": (0.65, 1.00),
 }
+
+
+def _band_pass(x, band):
+    """Radial band-pass reconstruction of ``x`` ([B,C,H,W], CLIP-normalised image
+    space) into a G17-1 frequency band.  Returns the real reconstruction with NO
+    amplitude re-scaling, so the caller can apply either a fixed training-set
+    scalar or a per-image re-scale.  This is the single band-pass implementation
+    shared by the detector view and the train-set RMS calibration (see
+    ``band_rms_scalar``), so the two always agree."""
+    lo, hi = _FREQ_RANGES[band]
+    h, w = x.shape[-2], x.shape[-1]
+    ys = torch.arange(h, dtype=torch.float32, device=x.device).view(h, 1)
+    xs = torch.arange(w, dtype=torch.float32, device=x.device).view(1, w)
+    rn = torch.sqrt((ys - h / 2.0) ** 2 + (xs - w / 2.0) ** 2) / (min(h, w) / 2.0)
+    mask = ((rn >= lo) & (rn <= hi)).to(x.dtype)
+    xf = torch.fft.fftshift(torch.fft.fft2(x, dim=(-2, -1)), dim=(-2, -1))
+    return torch.real(torch.fft.ifft2(
+        torch.fft.ifftshift(xf * mask, dim=(-2, -1)), dim=(-2, -1)))
+
+
+def band_rms_scalar(images, bands):
+    """Fixed per-band RMS scalars over a batch of CLIP-normalised images.
+
+    For each band returns the mean over the batch of the per-image std of the
+    band-passed reconstruction.  Averaged over the training set this is the
+    train-set-stats "fixed per-band RMS" constant (G17-1 §2): dividing each band
+    view by this CONSTANT preserves inter-image amplitude differences, unlike
+    per-image re-scaling which forces every image to the same RMS.  Calibrate via
+    ``experiment_utils.compute_comp_band_sigma`` (no-aug training loader).
+
+    Returns ``{band: float}``."""
+    out = {}
+    for band in bands:
+        stdev = _band_pass(images, band).std(dim=(-3, -2, -1))  # [B]
+        out[band] = float(stdev.mean())
+    return out
 
 
 @DETECTOR.register_module(module_name='effort_dualcomp')
@@ -68,8 +110,18 @@ class EffortDetectorDualComplement(EffortDetector):
         super().__init__(config)
 
         self.comp_bands = list(config.get('comp_freq_bands', ['low']))
-        self.comp_norm = config.get('comp_freq_norm', 'fixed_rms')
+        # G17-1 §2: 'train_rms' (fixed train-set per-band RMS scalar) is the G17-1
+        # normalisation — the "better" one that PRESERVES inter-image amplitude,
+        # vs per-image 'fixed_rms' which erases it.  Default to 'train_rms' so a
+        # dualcomp config that omits comp_freq_norm does NOT silently fall back to
+        # per-image scoring; it hits the fail-fast path instead (sigma must be
+        # provided).  run_g17_freq_sequence always passes 'train_rms' + the scalar.
+        self.comp_norm = config.get('comp_freq_norm', 'train_rms')
         self.comp_rms = float(config.get('comp_freq_rms', 0.5))
+        # Fixed per-band RMS scalars over the training set (G17-1 §2 'train_rms'):
+        # {band: float}.  Nil-safe: if absent the view falls back to per-image
+        # 'fixed_rms' (or raises for the explicit 'train_rms' mode).
+        self.comp_band_sigma = config.get('comp_band_sigma', None)
         self.comp_fuse = config.get('comp_fuse', 'gate')          # 'gate' | 'equal'
         self.comp_gate_hidden = int(config.get('comp_gate_hidden', 32))
         self.comp_lambda_freq = float(config.get('comp_lambda_freq', 1.0))
@@ -98,28 +150,41 @@ class EffortDetectorDualComplement(EffortDetector):
             nn.Linear(self.comp_gate_hidden, 1),
         )
 
-    # ── In-detector frequency-band view (torch, fixed-RMS) ─────────────────
-    def _radial_mask(self, h, w, lo, hi):
-        ys = torch.arange(h, dtype=torch.float32, device=self.last_device).view(h, 1)
-        xs = torch.arange(w, dtype=torch.float32, device=self.last_device).view(1, w)
-        dist = torch.sqrt((ys - h / 2.0) ** 2 + (xs - w / 2.0) ** 2)
-        rmax = min(h, w) / 2.0
-        rn = dist / rmax
-        return ((rn >= lo) & (rn <= hi)).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-
+    # ── In-detector frequency-band view (torch band-pass + fixed-RMS) ───────
     def _band_view(self, x, band):
         """Band-pass ``x`` ([B,C,H,W] CLIP-normalised) to a radial band, then
-        fixed-RMS normalise (G13 §7.3: NOT per-image min-max, which re-stretches
-        away the amplitude/contrast signal and is OOD for frozen CLIP)."""
-        lo, hi = _FREQ_RANGES[band]
-        xf = torch.fft.fftshift(torch.fft.fft2(x, dim=(-2, -1)), dim=(-2, -1))
-        mask = self._radial_mask(x.shape[-2], x.shape[-1], lo, hi).to(x.dtype)
-        rec = torch.real(torch.fft.ifft2(
-            torch.fft.ifftshift(xf * mask, dim=(-2, -1)), dim=(-2, -1)))
-        if self.comp_norm == 'fixed_rms':
-            rms = rec.std(dim=(-3, -2, -1), keepdim=True) + 1e-6
-            rec = rec / rms * self.comp_rms
-        return rec
+        re-normalise according to ``comp_freq_norm`` (G17-1 §2: NO per-image
+        min-max, which re-stretches away the amplitude/contrast signal and is
+        OOD for frozen CLIP):
+
+          * 'train_rms' (the G17-1 default) — divide by a FIXED per-band RMS
+            scalar ``comp_band_sigma[band]`` calibrated over the training set.
+            Because the divisor is a constant (not the per-image std), the
+            inter-image amplitude differences on the F line are PRESERVED.  The
+            scalar is threaded through build_config + arch_keys so train / val /
+            eval / testall all use the same normalisation.  Fails fast if the
+            scalar is absent, so no config can silently fall back to a different
+            F view at eval time.
+          * 'fixed_rms' — per-image re-scale to ``comp_rms`` (legacy fallback;
+            loses the inter-image amplitude cue).
+          * 'none' — no re-normalisation (raw band reconstruction)."""
+        rec = _band_pass(x, band)
+        if self.comp_norm == 'none':
+            return rec
+        sigma = (self.comp_band_sigma or {}).get(band)
+        if self.comp_norm == 'train_rms':
+            if sigma is None:
+                raise ValueError(
+                    f"comp_freq_norm='train_rms' needs a fixed per-band RMS "
+                    f"scalar for band '{band}' in 'comp_band_sigma' — compute it "
+                    f"over the training set with "
+                    f"experiment_utils.compute_comp_band_sigma. A constant scalar "
+                    f"is required so inter-image amplitude is preserved and "
+                    f"train/val/eval agree.")
+            return rec / sigma * self.comp_rms
+        # 'fixed_rms' — per-image re-scale (legacy fallback, no train-set stats).
+        rms = rec.std(dim=(-3, -2, -1), keepdim=True) + 1e-6
+        return rec / rms * self.comp_rms
 
     def _line_out(self, images):
         out = self.backbone(self._prep_input(images))
@@ -133,8 +198,6 @@ class EffortDetectorDualComplement(EffortDetector):
 
     # ── Core forward ────────────────────────────────────────────────────────
     def _dualcomp_forward(self, images):
-        self.last_device = images.device
-
         feats = {}
         # RGB line.
         feat_r, patch_r = self._line_out(images)

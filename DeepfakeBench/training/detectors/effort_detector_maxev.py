@@ -29,7 +29,10 @@ Non-symmetric behaviour (Sections 8-9): for real images (y=0) it drives the max
 fake probability to 0, hence *all* patches toward 0 (universal); for fake images
 (y=1) it drives the max fake probability to 1 — i.e. only requires *some* patch
 to be fake (existential).  Inference (Section 16) uses the CLS branch as the
-final score: prob = softmax(cls_logits)[:, 1].
+final score: prob = softmax(cls_logits)[:, 1].  (G15 supplement Strategy-3: set
+``max_evidence_inference='avg'`` to score the detection-time two-head average
+0.5*P_cls + 0.5*max_i q_{i,1} instead — gated on ``inference=True``, so the
+training loss is unchanged.)
 
 Design notes for this implementation:
     * The patch evidence head is a plain linear layer applied directly to the
@@ -93,6 +96,13 @@ class EffortDetectorMaxEvidence(EffortDetector):
                                 seed the patch evidence head (W_e <- W_cls).
         max_evidence_cls_feature: 'raw_token' (default, strict per doc §3/§4.1)
                                or 'pooler_output' (supplementary, b0-anchor-aligned).
+        max_evidence_inference: detection-time score rule (G15 supplement, only
+                               relevant when ``inference=True``):
+                               'cls' (default) — use the CLS head alone, i.e.
+                               prob = softmax(cls_logits)[:,1] (== current §16);
+                               'avg' — Strategy-3 two-head average, blending the
+                               image-level CLS head with the max-fake-evidence
+                               patch head, 0.5*P_cls + 0.5*max_i q_{i,1}.
     """
 
     def __init__(self, config=None):
@@ -118,6 +128,12 @@ class EffortDetectorMaxEvidence(EffortDetector):
         #                 feature the b0_cls_baseline ``self.head`` was trained on, so
         #                 the b0<->maxev CLS branch is a byte-identical control.
         self.cls_feature = config.get('max_evidence_cls_feature', 'raw_token')
+
+        # Detection-time score rule (G15 supplement Strategy-3).  Affects only
+        # the ``inference=True`` forward; the training loss is unchanged.
+        #   'avg' -> prob = 0.5*P_cls + 0.5*max_i q_{i,1}  (two-head average)
+        #   'cls' -> prob = P_cls                       (default, doc §16)
+        self.inference_mode = config.get('max_evidence_inference', 'cls')
 
         # Optional warm-start: seed the patch head from a trained CLS classifier
         # (Section 3 of AEPA_method.md, here applied to the max-evidence head).
@@ -153,17 +169,19 @@ class EffortDetectorMaxEvidence(EffortDetector):
 
     # ── Core forward ────────────────────────────────────────────────────────
 
-    def _max_ev_forward(self, images):
+    def _max_ev_forward(self, images, inference=False):
         """Forward images -> CLS logits, patch logits, and the selection.
 
         Returns a dict with:
             cls:            [B, 2]  CLS logits (argmax = class)
-            prob:           [B]     CLS fake probability = softmax(cls)[:, 1]
-                                    (Section 16: final detection score)
+            prob:           [B]     final detection score — P_cls (Section 16),
+                                    or, when ``inference and
+                                    inference_mode=='avg'`` (Strategy-3), the
+                                    two-head average 0.5*P_cls + 0.5*max_i q_{i,1}.
             feat:           [B, D]  CLS feature fed to the head (raw token, or
                                     pooler_output if cls_feature='pooler_output')
             cls_logits:     [B, 2]  alias of cls
-            cls_prob:       [B]     alias of prob
+            cls_prob:       [B]     alias of prob (P_cls, the CLS-head score)
             patch_logits:   [B, N, 2]  raw patch evidence-head logits
             patch_prob:     [B, N, 2]  softmax over the 2 classes per patch
             fake_prob_map:  [B, N]  per-patch fake probabilities q_{i,1}
@@ -188,11 +206,24 @@ class EffortDetectorMaxEvidence(EffortDetector):
         patch_logits = self.patch_head(patches)        # [B, N, 2]
         patch_prob = torch.softmax(patch_logits, dim=-1)   # [B, N, 2]
         fake_prob = patch_prob[..., 1]                 # [B, N]
+        patch_max_fake = fake_prob.max(dim=1).values   # [B]  q_{i*,1}
         max_index = fake_prob.argmax(dim=1)            # [B]
+
+        # Strategy-3 (G15 supplement): detection-time average of the two
+        # classification heads.  self.head yields the image-level CLS fake
+        # probability P_cls; self.patch_head (aggregated to its max-fake patch)
+        # yields q_{i*,1}.  Averaging 0.5/0.5 at inference is the "two-head
+        # average" the user asked for.  Gated on inference=True so the training
+        # loss and the train-time forward are unchanged; only the scored
+        # ``prob`` (what test.py/testall.py read) is blended.
+        if inference and self.inference_mode == 'avg':
+            prob = 0.5 * cls_prob + 0.5 * patch_max_fake
+        else:
+            prob = cls_prob
 
         return {
             'cls': cls_logits,
-            'prob': cls_prob,
+            'prob': prob,
             'feat': cls_feat,
             'cls_logits': cls_logits,
             'cls_prob': cls_prob,
@@ -202,17 +233,68 @@ class EffortDetectorMaxEvidence(EffortDetector):
             'max_index': max_index,
         }
 
+    def _avg_5d_forward(self, images):
+        """Strategy-3 two-head average under the multi-crop (5D) TTA path.
+
+        testall / test.py build the test loader with ``multi_crop=True`` (test.py
+        ``prepare_testing_data`` hard-codes it), so the primary detection metric
+        is always computed on 5D ``[B, N_crops, C, H, W]`` inputs.  To make
+        ``max_evidence_inference='avg'`` testable under that path, we replicate the
+        base argmax-confidence "TAA" ensemble but use the two-head average
+        ``0.5*P_cls + 0.5*q_{i*,1}`` as the PER-CROP score instead of P_cls alone.
+
+        Each crop runs the full maxev forward — the CLS head on the configured
+        ``cls_feature`` plus the patch evidence head aggregated to its max-fake
+        patch -> ``q_{i*,1}``.  The per-crop scores are then ensembled over crops
+        EXACTLY like the base 5D path (argmax-confidence on ``|score - 0.5|``), so
+        the aggregation is comparable to the 'cls' branch.  Because this path reads
+        ``cls_feature`` from config, the 'avg' branch is train/infer-consistent for
+        both raw_token and pooler_output (unlike the 'cls' delegation, which scores
+        the head on pooler_output regardless — see the module note).
+        """
+        b, n, c, h, w = images.shape
+        flat = images.view(-1, c, h, w)                    # [B*N, C, H, W]
+        out = self.backbone(self._prep_input(flat))
+        tokens = out['last_hidden_state']                 # [B*N, P+1, D]
+        cls_feat = (out['pooler_output']
+                    if self.cls_feature == 'pooler_output'
+                    else tokens[:, 0, :])                  # [B*N, D]
+        cls_logits = self.head(cls_feat)                  # [B*N, 2]
+        cls_prob = torch.softmax(cls_logits, dim=-1)[:, 1]  # [B*N]
+        patch_logits = self.patch_head(tokens[:, 1:, :])  # [B*N, P, 2]
+        q = torch.softmax(patch_logits, dim=-1)[..., 1]   # [B*N, P]
+        q_max = q.max(dim=1).values                       # [B*N]  q_{i*,1}
+        per_crop = 0.5 * cls_prob + 0.5 * q_max           # [B*N]
+        per_crop = per_crop.view(b, n)                    # [B, N]
+
+        # Base TAA ensemble (argmax-confidence), on the blended per-crop score.
+        conf = torch.abs(per_crop - 0.5)
+        max_idx = torch.argmax(conf, dim=1)               # [B]
+        ar = torch.arange(b, device=images.device)
+        final_prob = per_crop[ar, max_idx]
+        cls_logits = cls_logits.view(b, n, 2)
+        cls_feat = cls_feat.view(b, n, -1)
+        final_cls = cls_logits[ar, max_idx, :]
+        final_feat = cls_feat[ar, max_idx, :]
+        return {'cls': final_cls, 'prob': final_prob, 'feat': final_feat}
+
     def forward(self, data_dict, inference=False):
         images = data_dict['image']
 
-        # Multi-crop test-time augmentation [B, n_crops, C, H, W].  Delegate to
-        # the base forward so the CLS-branch ensemble (argmax-confidence patch
-        # selection) is byte-identical to the baseline, keeping TTA reported-AUC
-        # directly comparable.  Inference-only, so no patch_loss keys are needed.
+        # Multi-crop test-time augmentation [B, n_crops, C, H, W].  For the DEFAULT
+        # 'cls' rule we delegate to the base forward so the CLS-branch ensemble
+        # (argmax-confidence patch selection) is byte-identical to the baseline,
+        # keeping TTA reported-AUC directly comparable.  For the 'avg' rule we do
+        # NOT delegate — delegation would silently drop the patch-evidence head and
+        # make 'avg' degenerate to 'cls' (the pre-fix bug): we run the two-head
+        # blend ourselves under the same TAA aggregation.  Inference-only, so no
+        # patch_loss keys are needed.
         if inference and len(images.shape) == 5:
+            if self.inference_mode == 'avg':
+                return self._avg_5d_forward(images)
             return super().forward(data_dict, inference=True)
 
-        return self._max_ev_forward(images)
+        return self._max_ev_forward(images, inference)
 
 
     # ── Max-fake-evidence loss ──────────────────────────────────────────────

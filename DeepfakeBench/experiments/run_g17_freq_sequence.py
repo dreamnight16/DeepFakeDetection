@@ -45,7 +45,7 @@ _deepfake_dir = os.path.dirname(_current_dir)
 sys.path.insert(0, _current_dir)
 sys.path.insert(0, _deepfake_dir)
 
-from experiment_utils import build_config, train_model, evaluate_model
+from experiment_utils import build_config, train_model, evaluate_model, compute_comp_band_sigma
 
 TRAIN_DS = 'FaceForensics++'
 VAL_DS = 'Celeb-DF-v2'
@@ -130,7 +130,7 @@ def run_one(seq, exp, args):
             kwargs.update({
                 'comp_freq_bands': exp['comp_freq_bands'],
                 'comp_fuse': exp['comp_fuse'],
-                'comp_freq_norm': 'fixed_rms',
+                'comp_freq_norm': 'train_rms',
                 'comp_cls_feature': 'pooler_output',
                 'comp_lambda_freq': args.lambda_freq,
                 'comp_lambda_max': args.lambda_max,
@@ -147,6 +147,17 @@ def run_one(seq, exp, args):
             kwargs['residual_shuffle'] = exp['residual_shuffle']
 
     config = build_config(**kwargs)
+
+    # G17-1 model-side F line uses train-set-stats per-band RMS (G17-1 §2 — the
+    # better normalisation: a FIXED scalar preserves inter-image amplitude, unlike
+    # per-image re-scaling).  Calibrate the scalar over the training set once,
+    # then rebuild the config so the SAME scalar threads into the training and
+    # eval configs (and, via arch_keys, testall) — no per-image fallback, no
+    # silent divergence between train / val / eval.
+    if exp['model_name'] == 'effort_dualcomp':
+        sigma = compute_comp_band_sigma(config, exp['comp_freq_bands'])
+        kwargs['comp_band_sigma'] = sigma
+        config = build_config(**kwargs)
 
     ckpt = train_model(config, TRAIN_DS, VAL_DS)
     if ckpt is None:
