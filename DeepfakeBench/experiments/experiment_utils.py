@@ -62,6 +62,13 @@ def build_config(pyramid_mode='lap_pyramid',
                  comp_band_sigma=None,
                  comp_fuse='gate', comp_gate_hidden=32,
                  comp_lambda_freq=1.0, comp_lambda_max=1.0, comp_cls_feature='pooler_output',
+                 # G18 (LFEQ read-out head): structural + loss scalars, threaded
+                 # through build_config and into arch_keys so testall rebuilds
+                 # the model with identical head/weights/fusion (strict load).
+                 lfeq_hidden_dim=256, lfeq_num_evidence_tokens=8,
+                 lfeq_depth=2, lfeq_num_heads=8, lfeq_dropout=0.1,
+                 lfeq_fusion_weight=0.5, lfeq_evidence_weight=1.0,
+                 lfeq_diversity_weight=0.01,
                  log_dir=None,
                  train_dataset=None, test_dataset=None,
                  n_epochs=10, for_training=True):
@@ -146,6 +153,25 @@ def build_config(pyramid_mode='lap_pyramid',
         # rebuild the F line with an identical normalisation (a silent per-image
         # fallback would diverge the eval-time F view from training).
         config['comp_band_sigma'] = comp_band_sigma
+
+    # G18 (LFEQ read-out head) also has no mixup: the LFEQ query-transformer
+    # reads raw patch tokens and a global pixel mixup would smear the per-patch
+    # attention the evidence queries are specialised on.  Force it off.  We also
+    # force margin_loss_mode='off' — the LFEQ feat is the hidden-dim decision
+    # feature (256), NOT the 1024-dim pooler feature the asymmetric center loss
+    # is built around; leaving margin_loss on would crash on a shape mismatch.
+    if model_name == 'effort_lfeq':
+        config['use_mixup'] = False
+        config['mixup_mode'] = 'none'
+        config['margin_loss_mode'] = 'off'
+        config['lfeq_hidden_dim'] = lfeq_hidden_dim
+        config['lfeq_num_evidence_tokens'] = lfeq_num_evidence_tokens
+        config['lfeq_depth'] = lfeq_depth
+        config['lfeq_num_heads'] = lfeq_num_heads
+        config['lfeq_dropout'] = lfeq_dropout
+        config['lfeq_fusion_weight'] = lfeq_fusion_weight
+        config['lfeq_evidence_weight'] = lfeq_evidence_weight
+        config['lfeq_diversity_weight'] = lfeq_diversity_weight
     config['mixup_alpha'] = mixup_alpha
     config['mixup_gamma'] = mixup_gamma
     config['mix_domain'] = 'rgb'
@@ -414,7 +440,14 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
                  # G17-1 model-side dual-line gated-fusion structural keys.
                  'comp_freq_bands', 'comp_freq_norm', 'comp_freq_rms', 'comp_band_sigma',
                  'comp_fuse', 'comp_gate_hidden', 'comp_lambda_freq', 'comp_lambda_max',
-                 'comp_cls_feature')
+                 'comp_cls_feature',
+                 # G18 LFEQ read-out head structural keys (the module shape + the
+                 # fusion weight change the model structure; without them test.py
+                 # would rebuild the head with the default fusion=0.5 and strict
+                 # load would fail on the constructor re-init).
+                 'lfeq_hidden_dim', 'lfeq_num_evidence_tokens', 'lfeq_depth',
+                 'lfeq_num_heads', 'lfeq_dropout', 'lfeq_fusion_weight',
+                 'lfeq_evidence_weight', 'lfeq_diversity_weight')
     extra_config = {k: config[k] for k in arch_keys if k in config}
     testall_metrics = run_testall(ckpt_path, test_datasets, testall_log,
                                   extra_config=extra_config)
