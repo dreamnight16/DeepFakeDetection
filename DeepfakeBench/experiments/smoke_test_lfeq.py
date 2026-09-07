@@ -143,6 +143,42 @@ def test_diversity_regulariser(module):
     print(f"  [ok] diversity regulariser finite and >=0 (value={div.item():.4f})")
 
 
+def test_evidence_token_sweep(module):
+    """G18-2: all 6 K values in the sweep must build, forward, and backprop.
+
+    K=1 (no diversity, single evidence slot) through K=32 (33 query tokens in
+    self-attn).  Verifies the evidence-dependent shapes scale with K, that the
+    diversity regulariser is a no-op (0) for K=1, and that gradients reach the
+    trainable read-out for the extreme K values.
+    """
+    b, n, d = 3, 32, 1024
+    for k in (1, 2, 4, 8, 16, 32):
+        lfeq = module.LearnableForgeryEvidenceQuery(
+            vit_dim=d, hidden_dim=256, num_evidence_tokens=k,
+            depth=2, num_heads=8, fusion_weight=0.5)
+        patches = _make_patches(b=b, n=n, d=d, seed=k)
+        out = lfeq(patches)
+        # evidence-dependent shapes scale with K
+        assert out['evidence_logits'].shape == (b, k, 2), (k, out['evidence_logits'].shape)
+        assert out['attention_maps'].shape == (b, k, n), (k, out['attention_maps'].shape)
+        assert out['selected_evidence_index'].shape == (b,), k
+        assert out['fused_probs'].shape == (b, 2), k
+        # loss + backward (diversity is 0 when k < 2 and finite otherwise)
+        labels = torch.tensor([0, 1, 1])
+        li = lfeq.compute_loss(out, labels, evidence_weight=1.0, diversity_weight=0.01)
+        assert torch.isfinite(li['loss']) and torch.isfinite(li['diversity_loss']), k
+        if k == 1:
+            assert li['diversity_loss'].item() == 0.0, "K=1 must have an empty diversity term"
+        li['loss'].backward()
+        for nm, p in [('decision_token', lfeq.decision_token),
+                      ('evidence_tokens', lfeq.evidence_tokens),
+                      ('global_head', lfeq.global_head.weight),
+                      ('evidence_head', lfeq.evidence_head.weight)]:
+            assert p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0, \
+                f"(K={k}) no gradient flow to {nm}"
+    print("  [ok] evidence-token sweep K in {1,2,4,8,16,32}: build/forward/backward/diversity")
+
+
 def test_5d_aggregation_arithmetic(module):
     """Validate the argmax-confidence TAA aggregation the detector uses."""
     torch.manual_seed(0)
@@ -166,6 +202,7 @@ def py_compile_all():
         os.path.join(_DEEPFAKE, 'training', 'detectors', '__init__.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'experiment_utils.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'run_g18_lfeq.py'),
+        os.path.join(_DEEPFAKE, 'experiments', 'run_g18_2_evidence_sweep.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'smoke_test_lfeq.py'),
     ]
     for f in files:
@@ -206,7 +243,8 @@ if __name__ == '__main__':
     print("G18 LFEQ verification (local, torch-only)\n" + "=" * 50)
     for fn in (test_forward_shapes, test_fusion_arithmetic,
                test_hard_argmax_wiring, test_loss_composition_and_backward,
-               test_diversity_regulariser, test_5d_aggregation_arithmetic):
+               test_diversity_regulariser, test_evidence_token_sweep,
+               test_5d_aggregation_arithmetic):
         try:
             fn(mod)
         except Exception as e:  # noqa: BLE001
