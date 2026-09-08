@@ -160,11 +160,13 @@ def build_config(pyramid_mode='lap_pyramid',
     # force margin_loss_mode='off' — the LFEQ feat is the hidden-dim decision
     # feature (256), NOT the 1024-dim pooler feature the asymmetric center loss
     # is built around; leaving margin_loss on would crash on a shape mismatch.
-    # effort_lfeq_mean (G19-A) shares the SAME query-transformer body, so the
-    # identical mixup/margin off-switch and lfeq_* structural keys apply; the
-    # fusion_/evidence_/diversity_ scalars are set for arch_keys parity but are
-    # NOT read by the mean-pooled linear read-out.
-    if model_name in ('effort_lfeq', 'effort_lfeq_mean'):
+    # effort_lfeq_mean / effort_lfeq_per_token / effort_lfeq_concat (G19 A/B/C)
+    # share the SAME query-transformer body, so the identical mixup/margin
+    # off-switch and lfeq_* structural keys apply; the fusion_/evidence_/
+    # diversity_ scalars are set for arch_keys parity but are NOT read by the
+    # G19 read-out heads (only the query body reads them).
+    if model_name in ('effort_lfeq', 'effort_lfeq_mean',
+                      'effort_lfeq_per_token', 'effort_lfeq_concat'):
         config['use_mixup'] = False
         config['mixup_mode'] = 'none'
         config['margin_loss_mode'] = 'off'

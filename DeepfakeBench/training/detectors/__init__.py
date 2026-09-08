@@ -13,3 +13,5 @@ from .effort_detector_maxev import EffortDetectorMaxEvidence
 from .effort_detector_dualcomp import EffortDetectorDualComplement
 from .effort_detector_lfeq import EffortDetectorLFEQ
 from .effort_detector_lfeq_mean import EffortDetectorLFEQMean
+from .effort_detector_lfeq_per_token import EffortDetectorLFEQPerToken
+from .effort_detector_lfeq_concat import EffortDetectorLFEQConcat

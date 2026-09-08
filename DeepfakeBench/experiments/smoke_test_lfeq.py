@@ -1,14 +1,15 @@
-"""Local verification for the LFEQ read-out head (G18) and the G19 mean read-out.
+"""Local verification for the LFEQ read-out head (G18) and the G19 read-outs.
 
 This runs WITHOUT the heavy runtime deps (loralib / tensorboard / sklearn /
 datasets), which only exist on the server.  It loads ``detectors/lfeq_module.py``
-and ``detectors/token_mean_readout.py`` directly by file path (pure torch) and
+and ``detectors/token_readout.py`` directly by file path (pure torch) and
 exercises the novel pieces end-to-end: forward shapes, fusion arithmetic,
 hard-argmax selection, loss composition, gradient flow, the diversity
-regulariser (G18), and the G19 mean-pooled single-linear read-out (no LFEQ
-read-out keys, truthful mean arithmetic, single-CE gradient flow) — plus it
-static-checks (``py_compile``) every G18/G19 file and asserts the config-key
-names are consistent across detectors, ``build_config``, and ``arch_keys``.
+regulariser (G18), and all THREE G19 read-out modes (mean / per_token / concat)
+of ``TokenReadout`` — truthful arithmetic, single-CE gradient flow, no LFEQ
+read-out keys — plus it static-checks (``py_compile``) every G18/G19 file and
+asserts the config-key names are consistent across detectors, ``build_config``,
+and ``arch_keys``.
 
 The detector's own forward can't be instantiated here (its base class pulls the
 full training stack); instead we validate the module contract the detector relies
@@ -28,7 +29,7 @@ import torch
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DEEPFAKE = os.path.dirname(_HERE)
 _MODULE_PATH = os.path.join(_DEEPFAKE, 'training', 'detectors', 'lfeq_module.py')
-_TMR_PATH = os.path.join(_DEEPFAKE, 'training', 'detectors', 'token_mean_readout.py')
+_TOK_PATH = os.path.join(_DEEPFAKE, 'training', 'detectors', 'token_readout.py')
 
 
 def load_module():
@@ -46,8 +47,8 @@ def _load_as(name, path):
     return mod
 
 
-def load_token_mean_readout():
-    """Load ``token_mean_readout.py`` under a synthetic package so its
+def load_token_readout():
+    """Load ``token_readout.py`` under a synthetic package so its
     ``from .lfeq_module import EvidenceQueryBlock`` relative import resolves,
     without pulling the heavy training stack (loralib / datasets)."""
     dirname = os.path.dirname(_MODULE_PATH)   # training/detectors
@@ -56,7 +57,7 @@ def load_token_mean_readout():
     pkg.__path__ = [dirname]
     sys.modules[pkg_name] = pkg
     _load_as(pkg_name + '.lfeq_module', _MODULE_PATH)
-    return _load_as(pkg_name + '.token_mean_readout', _TMR_PATH)
+    return _load_as(pkg_name + '.token_readout', _TOK_PATH)
 
 
 def _make_patches(b=4, n=256, d=1024, seed=0):
@@ -183,12 +184,10 @@ def test_evidence_token_sweep(module):
             depth=2, num_heads=8, fusion_weight=0.5)
         patches = _make_patches(b=b, n=n, d=d, seed=k)
         out = lfeq(patches)
-        # evidence-dependent shapes scale with K
         assert out['evidence_logits'].shape == (b, k, 2), (k, out['evidence_logits'].shape)
         assert out['attention_maps'].shape == (b, k, n), (k, out['attention_maps'].shape)
         assert out['selected_evidence_index'].shape == (b,), k
         assert out['fused_probs'].shape == (b, 2), k
-        # loss + backward (diversity is 0 when k < 2 and finite otherwise)
         labels = torch.tensor([0, 1, 1])
         li = lfeq.compute_loss(out, labels, evidence_weight=1.0, diversity_weight=0.01)
         assert torch.isfinite(li['loss']) and torch.isfinite(li['diversity_loss']), k
@@ -220,63 +219,105 @@ def test_5d_aggregation_arithmetic(module):
     print("  [ok] 5D argmax-confidence TAA aggregation arithmetic")
 
 
-def test_mean_readout_forward(tmr_mod, b=4, n=256, d=1024, evi=8, hidden=256, heads=8):
-    """G19-A: forward shapes + must NOT expose any LFEQ read-out key."""
-    readout = tmr_mod.TokenMeanReadout(
+def _readout_contract(mod, mode, b=4, n=256, d=1024, evi=8, hidden=256, heads=8):
+    """Build a TokenReadout in ``mode``, forward random patches, return (readout, out)."""
+    readout = mod.TokenReadout(
         vit_dim=d, hidden_dim=hidden, num_evidence_tokens=evi,
-        depth=2, num_heads=heads, dropout=0.1)
+        depth=2, num_heads=heads, dropout=0.1, readout_mode=mode)
     out = readout(torch.randn(b, n, d))
+    assert readout.readout_mode == mode
+    # no LFEQ read-out keys (head split / argmax / fusion / div)
+    for k in ('fused_probs', 'global_logits', 'evidence_logits',
+              'selected_evidence_logits', 'selected_evidence_index',
+              'global_feature', 'evidence_features', 'attention_maps'):
+        assert k not in out, f"G19 read-out must NOT expose LFEQ read-out key {k}"
+    return readout, out
+
+
+def test_mean_readout_forward(mod, b=4, n=256, d=1024, evi=8, hidden=256):
+    """G19-A (mean): shapes + truthful arithmetic (pooled == mean, logits == head(pooled))."""
+    readout, out = _readout_contract(mod, 'mean', b=b, n=n, d=d, evi=evi, hidden=hidden)
     assert out['logits'].shape == (b, 2), out['logits'].shape
     assert out['probs'].shape == (b, 2)
     assert out['prob'].shape == (b,)
     assert out['pooled'].shape == (b, hidden), out['pooled'].shape
     assert out['queries'].shape == (b, evi + 1, hidden), out['queries'].shape
     assert out['prediction'].shape == (b,)
-    # G19 read-out: SINGLE linear over the mean of ALL query tokens.  It must NOT
-    # produce any of the LFEQ read-out keys (head split / argmax / fusion / div).
-    for k in ('fused_probs', 'global_logits', 'evidence_logits',
-              'selected_evidence_logits', 'selected_evidence_index',
-              'global_feature', 'evidence_features', 'attention_maps'):
-        assert k not in out, f"G19 read-out must NOT expose LFEQ read-out key {k}"
-    # arithmetic: pooled == mean over all K+1 tokens; logits == head(pooled)
     assert torch.allclose(out['pooled'], out['queries'].mean(dim=1), atol=1e-6), \
-        "pooled != mean over all query tokens"
+        "mean: pooled != mean over all query tokens"
     assert torch.allclose(out['logits'], readout.head(out['pooled']), atol=1e-6), \
-        "logits != head(pooled)"
+        "mean: logits != head(pooled)"
     assert torch.allclose(out['prob'], out['probs'][:, 1], atol=1e-7)
-    # all probs valid (0..1)
     assert torch.all(out['probs'] >= 0) and torch.all(out['probs'] <= 1)
-    # decision + K evidence tokens => exactly evi+1 query tokens
     assert out['queries'].shape[1] == readout.decision_token.shape[1] + readout.evidence_tokens.shape[1]
     print("  [ok] G19-A mean read-out: forward shapes + no-LFEQ-readout + arithmetic")
 
 
-def test_mean_readout_loss_grad(tmr_mod, b=4, n=32, d=1024, evi=8, hidden=256):
-    """G19-A: single CE loss is finite and gradients reach the query transformer."""
-    readout = tmr_mod.TokenMeanReadout(
-        vit_dim=d, hidden_dim=hidden, num_evidence_tokens=evi, depth=2, num_heads=8)
-    patches = torch.randn(b, n, d)
-    labels = torch.tensor([0, 1, 1, 1])
-    out = readout(patches)
-    loss = readout.compute_loss(out, labels)['loss']
-    assert torch.isfinite(loss), "loss is NaN/Inf"
-    loss.backward()
-    for nm, p in [('decision_token', readout.decision_token),
-                  ('evidence_tokens', readout.evidence_tokens),
-                  ('head.weight', readout.head.weight),
-                  ('patch_projection.weight', readout.patch_projection.weight),
-                  ('block0.cross_attn.in_proj_weight', readout.blocks[0].cross_attn.in_proj_weight)]:
-        assert p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0, \
-            f"no gradient flow to {nm}"
-    print("  [ok] G19-A mean read-out: single CE + gradient flow to head/tokens/attn")
+def test_per_token_readout_forward(mod, b=4, n=256, d=1024, evi=8, hidden=256):
+    """G19-B (per-token): K+1 independent heads; logits == soft-average of per-token logits."""
+    readout, out = _readout_contract(mod, 'per_token', b=b, n=n, d=d, evi=evi, hidden=hidden)
+    assert out['logits'].shape == (b, 2)
+    assert out['prob'].shape == (b,)
+    assert out['pooled'].shape == (b, hidden), "per_token feat is the mean-pool feature"
+    assert len(readout.heads) == evi + 1, len(readout.heads)
+    # arithmetic: logits == mean_i( head_i(queries_i) )
+    per = torch.stack([h(out['queries'][:, i]) for i, h in enumerate(readout.heads)], dim=1)
+    assert torch.allclose(out['logits'], per.mean(dim=1), atol=1e-6), \
+        "per_token: logits != soft-average of per-token logits"
+    # B must NOT reduce to A: independent heads mean per-token logits differ from a
+    # single shared head on the mean-pooled feature (same weights NOT reused).
+    assert torch.allclose(out['pooled'], out['queries'].mean(dim=1), atol=1e-6)
+    print("  [ok] G19-B per-token read-out: K+1 heads + logits == soft-average of per-token")
+
+
+def test_concat_readout_forward(mod, b=4, n=256, d=1024, evi=8, hidden=256):
+    """G19-C (concat): flatten all tokens; logits == head(flatten(queries))."""
+    readout, out = _readout_contract(mod, 'concat', b=b, n=n, d=d, evi=evi, hidden=hidden)
+    assert out['logits'].shape == (b, 2)
+    assert out['prob'].shape == (b,)
+    assert out['pooled'].shape == (b, hidden * (evi + 1)), out['pooled'].shape
+    assert out['queries'].shape == (b, evi + 1, hidden)
+    flat = out['queries'].reshape(b, -1)
+    assert torch.allclose(out['pooled'], flat, atol=1e-6), \
+        "concat: pooled != flatten(queries)"
+    assert torch.allclose(out['logits'], readout.head(flat), atol=1e-6), \
+        "concat: logits != head(flatten(queries))"
+    print("  [ok] G19-C concat read-out: flatten all tokens + wide linear head")
+
+
+def test_readout_loss_grad(mod, b=4, n=32, d=1024, evi=8, hidden=256):
+    """All THREE modes: single CE is finite and gradients reach the query transformer."""
+    for mode in ('mean', 'per_token', 'concat'):
+        readout = mod.TokenReadout(
+            vit_dim=d, hidden_dim=hidden, num_evidence_tokens=evi, depth=2, num_heads=8,
+            dropout=0.1, readout_mode=mode)
+        patches = torch.randn(b, n, d)
+        labels = torch.tensor([0, 1, 1, 1])
+        out = readout(patches)
+        loss = readout.compute_loss(out, labels)['loss']
+        assert torch.isfinite(loss), f"{mode}: loss is NaN/Inf"
+        loss.backward()
+        head_param = ('head', readout.head.weight) if readout.head is not None \
+            else ('heads[0]', readout.heads[0].weight)
+        for nm, p in [('decision_token', readout.decision_token),
+                      ('evidence_tokens', readout.evidence_tokens),
+                      (head_param[0], head_param[1]),
+                      ('patch_projection.weight', readout.patch_projection.weight),
+                      ('block0.cross_attn.in_proj_weight', readout.blocks[0].cross_attn.in_proj_weight)]:
+            assert p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0, \
+                f"({mode}) no gradient flow to {nm}"
+    print("  [ok] all G19 modes: single CE + gradient flow to head/tokens/attn")
 
 
 def py_compile_all():
     files = [
         os.path.join(_DEEPFAKE, 'training', 'detectors', 'lfeq_module.py'),
-        os.path.join(_DEEPFAKE, 'training', 'detectors', 'token_mean_readout.py'),
+        os.path.join(_DEEPFAKE, 'training', 'detectors', 'token_readout.py'),
         os.path.join(_DEEPFAKE, 'training', 'detectors', 'effort_detector_lfeq.py'),
+        os.path.join(_DEEPFAKE, 'training', 'detectors', 'effort_detector_lfeq_readout_base.py'),
         os.path.join(_DEEPFAKE, 'training', 'detectors', 'effort_detector_lfeq_mean.py'),
+        os.path.join(_DEEPFAKE, 'training', 'detectors', 'effort_detector_lfeq_per_token.py'),
+        os.path.join(_DEEPFAKE, 'training', 'detectors', 'effort_detector_lfeq_concat.py'),
         os.path.join(_DEEPFAKE, 'training', 'detectors', '__init__.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'experiment_utils.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'run_g18_lfeq.py'),
@@ -290,7 +331,7 @@ def py_compile_all():
         if r.returncode != 0:
             print(f"  [x] py_compile FAILED: {os.path.basename(f)}\n{r.stderr}")
             return False
-    print("  [ok] py_compile all G18 files")
+    print("  [ok] py_compile all G18/G19 files")
     return True
 
 
@@ -299,7 +340,7 @@ def check_key_consistency():
     and arch_keys (static read + regex)."""
     import re
     det_text = ""
-    for f in ('effort_detector_lfeq.py', 'effort_detector_lfeq_mean.py'):
+    for f in ('effort_detector_lfeq.py', 'effort_detector_lfeq_readout_base.py'):
         det_text += open(os.path.join(_DEEPFAKE, 'training', 'detectors', f),
                          encoding='utf-8').read()
     utils = open(os.path.join(_DEEPFAKE, 'experiments',
@@ -307,7 +348,6 @@ def check_key_consistency():
     det_keys = set(re.findall(r"config\.get\('(lfeq_[a-z_]+)'", det_text))
     utils_keys = set(re.findall(r"config\['(lfeq_[a-z_]+)'\]", utils))
     arch_keys = set(re.findall(r"'(lfeq_[a-z_]+)'", utils))
-    # the detector also reads config.get('lfeq_...') — union & compare
     missing_in_utils = det_keys - utils_keys
     missing_in_det = utils_keys - det_keys
     assert not missing_in_utils, f"setup keys used by detector but not set in build_config: {missing_in_utils}"
@@ -320,7 +360,7 @@ def check_key_consistency():
 
 if __name__ == '__main__':
     mod = load_module()
-    tmr = load_token_mean_readout()
+    tok = load_token_readout()
     ok = True
     print("G18 + G19 verification (local, torch-only)\n" + "=" * 50)
     for fn in (test_forward_shapes, test_fusion_arithmetic,
@@ -332,9 +372,10 @@ if __name__ == '__main__':
         except Exception as e:  # noqa: BLE001
             ok = False
             print(f"  [x] {fn.__name__} FAILED: {e}")
-    for fn in (test_mean_readout_forward, test_mean_readout_loss_grad):
+    for fn in (test_mean_readout_forward, test_per_token_readout_forward,
+               test_concat_readout_forward, test_readout_loss_grad):
         try:
-            fn(tmr)
+            fn(tok)
         except Exception as e:  # noqa: BLE001
             ok = False
             print(f"  [x] {fn.__name__} FAILED: {e}")
