@@ -1,12 +1,14 @@
-"""Local verification for the LFEQ read-out head (G18).
+"""Local verification for the LFEQ read-out head (G18) and the G19 mean read-out.
 
 This runs WITHOUT the heavy runtime deps (loralib / tensorboard / sklearn /
 datasets), which only exist on the server.  It loads ``detectors/lfeq_module.py``
-directly by file path (the module is pure torch) and exercises the novel piece
-end-to-end: forward shapes, fusion arithmetic, hard-argmax selection, loss
-composition, gradient flow, and the diversity regulariser — plus it static-checks
-(``py_compile``) every G18 file for syntax and asserts the config-key names are
-consistent between the detector, ``build_config``, and ``arch_keys``.
+and ``detectors/token_mean_readout.py`` directly by file path (pure torch) and
+exercises the novel pieces end-to-end: forward shapes, fusion arithmetic,
+hard-argmax selection, loss composition, gradient flow, the diversity
+regulariser (G18), and the G19 mean-pooled single-linear read-out (no LFEQ
+read-out keys, truthful mean arithmetic, single-CE gradient flow) — plus it
+static-checks (``py_compile``) every G18/G19 file and asserts the config-key
+names are consistent across detectors, ``build_config``, and ``arch_keys``.
 
 The detector's own forward can't be instantiated here (its base class pulls the
 full training stack); instead we validate the module contract the detector relies
@@ -19,12 +21,14 @@ import importlib.util
 import os
 import subprocess
 import sys
+import types
 
 import torch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DEEPFAKE = os.path.dirname(_HERE)
 _MODULE_PATH = os.path.join(_DEEPFAKE, 'training', 'detectors', 'lfeq_module.py')
+_TMR_PATH = os.path.join(_DEEPFAKE, 'training', 'detectors', 'token_mean_readout.py')
 
 
 def load_module():
@@ -32,6 +36,27 @@ def load_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _load_as(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_token_mean_readout():
+    """Load ``token_mean_readout.py`` under a synthetic package so its
+    ``from .lfeq_module import EvidenceQueryBlock`` relative import resolves,
+    without pulling the heavy training stack (loralib / datasets)."""
+    dirname = os.path.dirname(_MODULE_PATH)   # training/detectors
+    pkg_name = 'detectors_smoke'
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [dirname]
+    sys.modules[pkg_name] = pkg
+    _load_as(pkg_name + '.lfeq_module', _MODULE_PATH)
+    return _load_as(pkg_name + '.token_mean_readout', _TMR_PATH)
 
 
 def _make_patches(b=4, n=256, d=1024, seed=0):
@@ -195,14 +220,68 @@ def test_5d_aggregation_arithmetic(module):
     print("  [ok] 5D argmax-confidence TAA aggregation arithmetic")
 
 
+def test_mean_readout_forward(tmr_mod, b=4, n=256, d=1024, evi=8, hidden=256, heads=8):
+    """G19-A: forward shapes + must NOT expose any LFEQ read-out key."""
+    readout = tmr_mod.TokenMeanReadout(
+        vit_dim=d, hidden_dim=hidden, num_evidence_tokens=evi,
+        depth=2, num_heads=heads, dropout=0.1)
+    out = readout(torch.randn(b, n, d))
+    assert out['logits'].shape == (b, 2), out['logits'].shape
+    assert out['probs'].shape == (b, 2)
+    assert out['prob'].shape == (b,)
+    assert out['pooled'].shape == (b, hidden), out['pooled'].shape
+    assert out['queries'].shape == (b, evi + 1, hidden), out['queries'].shape
+    assert out['prediction'].shape == (b,)
+    # G19 read-out: SINGLE linear over the mean of ALL query tokens.  It must NOT
+    # produce any of the LFEQ read-out keys (head split / argmax / fusion / div).
+    for k in ('fused_probs', 'global_logits', 'evidence_logits',
+              'selected_evidence_logits', 'selected_evidence_index',
+              'global_feature', 'evidence_features', 'attention_maps'):
+        assert k not in out, f"G19 read-out must NOT expose LFEQ read-out key {k}"
+    # arithmetic: pooled == mean over all K+1 tokens; logits == head(pooled)
+    assert torch.allclose(out['pooled'], out['queries'].mean(dim=1), atol=1e-6), \
+        "pooled != mean over all query tokens"
+    assert torch.allclose(out['logits'], readout.head(out['pooled']), atol=1e-6), \
+        "logits != head(pooled)"
+    assert torch.allclose(out['prob'], out['probs'][:, 1], atol=1e-7)
+    # all probs valid (0..1)
+    assert torch.all(out['probs'] >= 0) and torch.all(out['probs'] <= 1)
+    # decision + K evidence tokens => exactly evi+1 query tokens
+    assert out['queries'].shape[1] == readout.decision_token.shape[1] + readout.evidence_tokens.shape[1]
+    print("  [ok] G19-A mean read-out: forward shapes + no-LFEQ-readout + arithmetic")
+
+
+def test_mean_readout_loss_grad(tmr_mod, b=4, n=32, d=1024, evi=8, hidden=256):
+    """G19-A: single CE loss is finite and gradients reach the query transformer."""
+    readout = tmr_mod.TokenMeanReadout(
+        vit_dim=d, hidden_dim=hidden, num_evidence_tokens=evi, depth=2, num_heads=8)
+    patches = torch.randn(b, n, d)
+    labels = torch.tensor([0, 1, 1, 1])
+    out = readout(patches)
+    loss = readout.compute_loss(out, labels)['loss']
+    assert torch.isfinite(loss), "loss is NaN/Inf"
+    loss.backward()
+    for nm, p in [('decision_token', readout.decision_token),
+                  ('evidence_tokens', readout.evidence_tokens),
+                  ('head.weight', readout.head.weight),
+                  ('patch_projection.weight', readout.patch_projection.weight),
+                  ('block0.cross_attn.in_proj_weight', readout.blocks[0].cross_attn.in_proj_weight)]:
+        assert p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0, \
+            f"no gradient flow to {nm}"
+    print("  [ok] G19-A mean read-out: single CE + gradient flow to head/tokens/attn")
+
+
 def py_compile_all():
     files = [
         os.path.join(_DEEPFAKE, 'training', 'detectors', 'lfeq_module.py'),
+        os.path.join(_DEEPFAKE, 'training', 'detectors', 'token_mean_readout.py'),
         os.path.join(_DEEPFAKE, 'training', 'detectors', 'effort_detector_lfeq.py'),
+        os.path.join(_DEEPFAKE, 'training', 'detectors', 'effort_detector_lfeq_mean.py'),
         os.path.join(_DEEPFAKE, 'training', 'detectors', '__init__.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'experiment_utils.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'run_g18_lfeq.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'run_g18_2_evidence_sweep.py'),
+        os.path.join(_DEEPFAKE, 'experiments', 'run_g19.py'),
         os.path.join(_DEEPFAKE, 'experiments', 'smoke_test_lfeq.py'),
     ]
     for f in files:
@@ -219,11 +298,13 @@ def check_key_consistency():
     """Cross-check the lfeq_* keys are identical in detector reads, build_config,
     and arch_keys (static read + regex)."""
     import re
-    det = open(os.path.join(_DEEPFAKE, 'training', 'detectors',
-                            'effort_detector_lfeq.py'), encoding='utf-8').read()
+    det_text = ""
+    for f in ('effort_detector_lfeq.py', 'effort_detector_lfeq_mean.py'):
+        det_text += open(os.path.join(_DEEPFAKE, 'training', 'detectors', f),
+                         encoding='utf-8').read()
     utils = open(os.path.join(_DEEPFAKE, 'experiments',
                               'experiment_utils.py'), encoding='utf-8').read()
-    det_keys = set(re.findall(r"config\.get\('(lfeq_[a-z_]+)'", det))
+    det_keys = set(re.findall(r"config\.get\('(lfeq_[a-z_]+)'", det_text))
     utils_keys = set(re.findall(r"config\['(lfeq_[a-z_]+)'\]", utils))
     arch_keys = set(re.findall(r"'(lfeq_[a-z_]+)'", utils))
     # the detector also reads config.get('lfeq_...') — union & compare
@@ -239,14 +320,21 @@ def check_key_consistency():
 
 if __name__ == '__main__':
     mod = load_module()
+    tmr = load_token_mean_readout()
     ok = True
-    print("G18 LFEQ verification (local, torch-only)\n" + "=" * 50)
+    print("G18 + G19 verification (local, torch-only)\n" + "=" * 50)
     for fn in (test_forward_shapes, test_fusion_arithmetic,
                test_hard_argmax_wiring, test_loss_composition_and_backward,
                test_diversity_regulariser, test_evidence_token_sweep,
                test_5d_aggregation_arithmetic):
         try:
             fn(mod)
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f"  [x] {fn.__name__} FAILED: {e}")
+    for fn in (test_mean_readout_forward, test_mean_readout_loss_grad):
+        try:
+            fn(tmr)
         except Exception as e:  # noqa: BLE001
             ok = False
             print(f"  [x] {fn.__name__} FAILED: {e}")
