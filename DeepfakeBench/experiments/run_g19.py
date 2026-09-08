@@ -109,7 +109,7 @@ def _cross_and_gap(summary):
     return cross, in_auc, gap
 
 
-def _print_table(results):
+def _print_table(results, seed):
     cols = TEST_DS
     hdr = (f"\n  {'Arm':<8s} | {'Model':<17s} |"
            + " | ".join(f"{d[:11]:>11s}" for d in cols)
@@ -141,7 +141,7 @@ def _print_table(results):
     print(f"\n  AUC_cross = mean({', '.join(CROSS_METRIC_DS)}) — G16 discipline. "
           f"In(+FF++) = in-domain FaceForensics++ column; G = In − AUC_cross. "
           f"Celeb-DF-v2 is partly selection-circular (best-ckpt val set); DFDC is "
-          f"the cleanest cross-domain read.  Seed = {args.seed} single-run (a "
+          f"the cleanest cross-domain read.  Seed = {seed} single-run (a "
           f"positive claim needs ≥3 distinct seeds, G15 discipline).")
 
 
@@ -170,7 +170,7 @@ def main():
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2, default=str)
 
-    _print_table(results)
+    _print_table(results, args.seed)
     print(f"\n  Full per-arm per-dataset metrics: {args.output_dir}/all_results.json")
 
 
