@@ -22,6 +22,27 @@ def pair(source="r0", method="FF-DF"):
 
 
 class ManifestContracts(unittest.TestCase):
+    def test_string_lineage_is_rejected(self):
+        from g21.manifest import load_videos
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "videos.jsonl"
+            rows = [{"schema_version": 1, "dataset_id": "ffpp", "video_id": f"v{i}",
+                     "split": "val", "label": i, "lineage_source_ids": "r0",
+                     "frames": [{"frame_id": "0", "path": f"v{i}/0.png"}]} for i in (0, 1)]
+            p.write_text("\n".join(map(json.dumps, rows)), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "lineage"):
+                load_videos(p)
+
+    def test_one_real_cannot_alias_two_sources(self):
+        from g21.manifest import load_pairs
+        rows = [pair("r0"), pair("r1")]
+        rows[1]["real_video_id"] = rows[0]["real_video_id"]
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "pairs.jsonl"
+            p.write_text("\n".join(map(json.dumps, rows)), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_pairs(p)
+
     def test_unverified_mapping_is_rejected(self):
         from g21.manifest import validate_pair
         item = pair()
@@ -53,6 +74,13 @@ class ManifestContracts(unittest.TestCase):
 
 
 class ConfigurationContracts(unittest.TestCase):
+    def test_protocol_does_not_silently_change_heldout(self):
+        from g21.config import DEFAULT_CONFIG, validate_config
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg["data"].update(train_methods=["FF-F2F", "FF-FS", "FF-NT"], heldout_method="FF-DF")
+        with self.assertRaisesRegex(ValueError, "NT"):
+            validate_config(cfg)
+
     def test_all_arms_share_window_and_data(self):
         from g21.config import DEFAULT_CONFIG, resolve_arm
         arms = [resolve_arm(copy.deepcopy(DEFAULT_CONFIG), arm, 1024) for arm in "ABCD"]
