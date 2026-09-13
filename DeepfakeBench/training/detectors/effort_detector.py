@@ -145,7 +145,8 @@ class EffortDetector(nn.Module):
         # std: [0.26862954, 0.26130258, 0.27577711]
         
         # ViT-L/14 224*224
-        clip_model = CLIPModel.from_pretrained("/home/user1/effort/effort_main/Effort-AIGI-Detection-main/DeepfakeBench/training/models--openai--clip-vit-large-patch14")
+        clip_path = (config or {}).get('clip_pretrained_path', "/home/user1/effort/effort_main/Effort-AIGI-Detection-main/DeepfakeBench/training/models--openai--clip-vit-large-patch14")
+        clip_model = CLIPModel.from_pretrained(clip_path)
 
         for param in clip_model.vision_model.parameters():
             param.requires_grad = False

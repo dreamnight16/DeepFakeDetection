@@ -39,6 +39,9 @@ parser.add_argument('--detector_path', type=str,
 parser.add_argument("--test_dataset", nargs="+")
 parser.add_argument('--weights_path', type=str,
                     default='./weights/effort_ckpt.pth')
+parser.add_argument('--artifact_dir', default=None)
+parser.add_argument('--dataset_json_folder', default=None)
+parser.add_argument('--data_root', default=None)
 #parser.add_argument("--lmdb", action='store_true', default=False)
 args = parser.parse_args()
 
@@ -129,7 +132,9 @@ def test_epoch(model, test_data_loaders, config=None):
         predictions_nps, label_nps, feat_nps = test_one_dataset(model, test_data_loaders[key], use_adaptive)
 
         # 保存概率与标签供 testall.py 画分布图使用
-        np.save(f'/tmp/effort_probs_{key}.npy', np.stack([predictions_nps, label_nps], axis=1))
+        artifact_dir = (config or {}).get('evaluation_artifact_dir', '/tmp')
+        os.makedirs(artifact_dir, exist_ok=True)
+        np.save(os.path.join(artifact_dir, f'effort_probs_{key}.npy'), np.stack([predictions_nps, label_nps], axis=1))
 
         if use_adaptive:
             final_adaptive_th = model.compute_adaptive_threshold()
@@ -187,6 +192,12 @@ def main():
     with open('./training/config/test_config.yaml', 'r') as f:
         config2 = yaml.safe_load(f)
     config.update(config2)
+    if args.dataset_json_folder is not None:
+        config['dataset_json_folder'] = args.dataset_json_folder
+    if args.data_root is not None:
+        config['rgb_root_override'] = args.data_root
+    if args.artifact_dir is not None:
+        config['evaluation_artifact_dir'] = args.artifact_dir
     if on_2060:
         config['lmdb_dir'] = r'I:\transform_2_lmdb'
         config['train_batchSize'] = 10

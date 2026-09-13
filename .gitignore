@@ -8,4 +8,9 @@ __pycache__/
 PSEUDOCODE*.md
 *.bak
 DeepfakeBench/preprocessing/dataset_json/
+/DeepfakeBench/experiment_results/g21/
+/DeepfakeBench/training/config/g21.local.yaml
+/DeepfakeBench/.coverage
+/DeepfakeBench/htmlcov/
+/DeepfakeBench/.pytest_cache/
 DeepfakeBench/preprocessing/dataset_json/

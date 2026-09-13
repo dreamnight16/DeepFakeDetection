@@ -1,0 +1,8 @@
+{
+  "verification": "static_only",
+  "python_files_parsed": 24,
+  "historical_functions_ast_identical": 8,
+  "runtime_tests_executed": false,
+  "server_tests": "pending",
+  "note": "User requested code only and server-side runtime verification."
+}

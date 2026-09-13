@@ -1,0 +1,53 @@
+# All four arms are implemented together; no stage gate.
+# Relative paths resolve against this configuration file.
+schema_version: 1
+experiment: G21
+protocol: g18_g19_legacy_testall_v1
+seed: 1024
+paths:
+  data_root: null                         # e.g. /home/user1/effort/data
+  clip_pretrained_path: null              # local CLIP ViT-L/14 directory
+  train_manifest: null                   # built pairs_train.jsonl
+  dataset_json_folder: ../../preprocessing/dataset_json  # existing historical dataset indices
+  output_root: ../../experiment_results/g21
+model:
+  use_loralib: true
+  full_train_head: true
+  use_freq_split: false
+  margin_loss_mode: "off"
+data:
+  train_methods: [FF-DF, FF-F2F, FF-FS, FF-NT]
+  pairs_per_microbatch: 4
+  frames_per_training_video: 2
+  training_frame_pool: 8
+  evaluation_frames_per_video: 8
+  resolution: 224
+  views: [reference, jpeg]
+  horizontal_flip_probability: 0.5
+  jpeg_quality_min: 70
+  jpeg_quality_max: 100
+loss:
+  pairing: matched
+  pair_mode: mean
+  pair_lambda: 1.0
+  pair_margin: 0.0
+  robust_temperature: 0.5
+optimizer:
+  lr: 0.0002
+  betas: [0.9, 0.999]
+  eps: 0.00000001
+  weight_decay: 0.0005
+training:
+  device: cuda:0
+  precision: fp32
+  max_updates: 6000
+  val_every_updates: 200
+  save_last_every_updates: 200
+  evaluation_batch_size: 32
+  selection_metric: auc                 # SAME checkpoint criterion as G18/G19
+  gradient_mode: two_pass_replay
+  deterministic: true
+evaluation:
+  backend: legacy_testall
+  validation_dataset: Celeb-DF-v2
+  test_datasets: [WDF, FFIW, Celeb-DF-v2, DeepFakeDetection, DFDC, DFDCP, DeeperForensics-1.0, FaceForensics++]

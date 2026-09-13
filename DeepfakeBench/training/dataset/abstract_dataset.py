@@ -298,7 +298,7 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
     def load_rgb_original(self, file_path):
         """Load RGB image WITHOUT resizing (needed for texture sliding-window)."""
         file_path = file_path.replace('\\', '/')
-        base_data_path = '/home/user1/effort/data'
+        base_data_path = self.config.get('rgb_root_override', '/home/user1/effort/data')
         if not file_path.startswith('/'):
             file_path = os.path.join(base_data_path, file_path)
         if not self.lmdb:
@@ -329,7 +329,7 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
             ValueError: If the loaded image is None.
         """
         file_path = file_path.replace('\\', '/')
-        base_data_path = '/home/user1/effort/data'
+        base_data_path = self.config.get('rgb_root_override', '/home/user1/effort/data')
         if not file_path.startswith('/'):
             file_path = os.path.join(base_data_path, file_path)
         

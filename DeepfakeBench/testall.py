@@ -23,6 +23,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--detector_path", required=True)
 parser.add_argument("--weights_path",  required=True)
 parser.add_argument("--test_datasets", nargs="+", required=True)
+parser.add_argument("--artifact_dir", default=None, help="Optional isolated output directory; metric computation is unchanged")
+parser.add_argument("--dataset_json_folder", default=None)
+parser.add_argument("--data_root", default=None)
 args = parser.parse_args()
 
 METRIC_RE = re.compile(r"^([a-zA-Z_]+):\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)$")
@@ -42,6 +45,10 @@ def run_dataset(dataset):
         "--test_dataset",  dataset,
         "--weights_path",  args.weights_path,
     ]
+    for option in ("artifact_dir", "dataset_json_folder", "data_root"):
+        value = getattr(args, option)
+        if value is not None:
+            cmd.extend(["--" + option, value])
 
     print(f"\n{'='*60}")
     print(f"dataset: {dataset}")
@@ -83,7 +90,7 @@ for ds in args.test_datasets:
     else:
         print(f"[WARNING] No metrics parsed for {ds} — skipping from average.")
     # 读取 test.py 保存的临时概率文件（col0=prob, col1=label）
-    npy_path = f"/tmp/effort_probs_{ds}.npy"
+    npy_path = os.path.join(args.artifact_dir or "/tmp", f"effort_probs_{ds}.npy")
     if os.path.exists(npy_path):
         data = np.load(npy_path)   # shape [N, 2]
         all_probs[ds] = data  # shape [N, 2]：col0=prob, col1=label
@@ -139,6 +146,6 @@ if all_probs:
                  fontsize=13, y=1.02)
     fig.tight_layout()
 
-    out_path = "prob_density.png"
+    out_path = os.path.join(args.artifact_dir, "prob_density.png") if args.artifact_dir else "prob_density.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"\n概率密度分布图已保存至 {out_path}")
