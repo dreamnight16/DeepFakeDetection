@@ -160,13 +160,14 @@ def build_config(pyramid_mode='lap_pyramid',
     # force margin_loss_mode='off' — the LFEQ feat is the hidden-dim decision
     # feature (256), NOT the 1024-dim pooler feature the asymmetric center loss
     # is built around; leaving margin_loss on would crash on a shape mismatch.
-    # effort_lfeq_mean / effort_lfeq_per_token / effort_lfeq_concat (G19 A/B/C)
-    # share the SAME query-transformer body, so the identical mixup/margin
-    # off-switch and lfeq_* structural keys apply; the fusion_/evidence_/
-    # diversity_ scalars are set for arch_keys parity but are NOT read by the
-    # G19 read-out heads (only the query body reads them).
+    # effort_lfeq_mean / effort_lfeq_per_token / effort_lfeq_concat (G19 A/B/C),
+    # effort_g22_last_block_input, and effort_g23_cross_only share the same
+    # configurable query dimensions, so the identical mixup/margin off-switch
+    # and lfeq_* structural keys apply.  The fusion_/evidence_/diversity_
+    # scalars are carried for arch_keys parity but are only consumed by G18.
     if model_name in ('effort_lfeq', 'effort_lfeq_mean',
-                      'effort_lfeq_per_token', 'effort_lfeq_concat'):
+                      'effort_lfeq_per_token', 'effort_lfeq_concat',
+                      'effort_g22_last_block_input', 'effort_g23_cross_only'):
         config['use_mixup'] = False
         config['mixup_mode'] = 'none'
         config['margin_loss_mode'] = 'off'
@@ -287,6 +288,10 @@ def run_testall(ckpt_path, test_datasets, log_path, extra_config=None):
     with open(log_path, 'w') as lf:
         proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
     os.unlink(TMP)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"testall failed with exit code {proc.returncode}; see {log_path}"
+        )
     metrics = {}
     with open(log_path, 'r') as lf:
         current_ds = None
