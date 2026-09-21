@@ -259,7 +259,7 @@ def train_model(config, train_dataset, val_dataset):
 
 # ── testall.py evaluation (subprocess) ─────────────────────────────────────
 
-def run_testall(ckpt_path, test_datasets, log_path, extra_config=None):
+def run_testall(ckpt_path, test_datasets, log_path, extra_config=None, artifact_dir=None):
     """Run testall.py on checkpoint; return per-dataset metrics dict.
 
     extra_config: optional dict of model-architecture config keys (e.g.
@@ -269,7 +269,8 @@ def run_testall(ckpt_path, test_datasets, log_path, extra_config=None):
     fails with unexpected keys like 'stem.weight').
     """
     testall_py = os.path.join(_deepfake_dir, 'testall.py')
-    TMP = tempfile.mkstemp(suffix='.yaml', prefix='effort_testall_')[1]
+    fd, TMP = tempfile.mkstemp(suffix='.yaml', prefix='effort_testall_')
+    os.close(fd)
     with open(DETECTOR_YAML, 'r') as f:
         yc = yaml.safe_load(f)
     with open(TEST_YAML, 'r') as f:
@@ -283,6 +284,9 @@ def run_testall(ckpt_path, test_datasets, log_path, extra_config=None):
         yaml.dump(yc, f)
     cmd = [sys.executable, testall_py, '--detector_path', TMP,
            '--weights_path', ckpt_path, '--test_datasets'] + test_datasets
+    if artifact_dir is not None:
+        os.makedirs(artifact_dir, exist_ok=True)
+        cmd.extend(['--artifact_dir', str(artifact_dir)])
     print(f"  [testall] {' '.join(cmd)}")
     sys.stdout.flush()
     with open(log_path, 'w') as lf:
@@ -458,10 +462,21 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
                  # load would fail on the constructor re-init).
                  'lfeq_hidden_dim', 'lfeq_num_evidence_tokens', 'lfeq_depth',
                  'lfeq_num_heads', 'lfeq_dropout', 'lfeq_fusion_weight',
-                 'lfeq_evidence_weight', 'lfeq_diversity_weight')
+                 'lfeq_evidence_weight', 'lfeq_diversity_weight',
+                 # G25 insertion/mask/loss must survive the testall subprocess.
+                 'g25_num_tokens', 'g25_insert_layer', 'g25_attention_mode',
+                 'g25_supervision', 'g25_fusion_weight', 'g25_evidence_weight',
+                 'g25_diversity_weight', 'clip_pretrained_path', 'full_train_head')
     extra_config = {k: config[k] for k in arch_keys if k in config}
+    # G25 runs also isolate testall artifacts and retain their requested seed.
+    # Keep other experiments' existing command/config behavior unchanged.
+    if config.get('testall_artifact_dir') is not None:
+        for key in ('manualSeed', 'use_mixup', 'mixup_mode', 'margin_loss_mode',
+                    'use_texture_crop', 'optimizer_wrapper', 'rank_loss_weight'):
+            extra_config[key] = config[key]
     testall_metrics = run_testall(ckpt_path, test_datasets, testall_log,
-                                  extra_config=extra_config)
+                                  extra_config=extra_config,
+                                  artifact_dir=config.get('testall_artifact_dir'))
 
     del model
     torch.cuda.empty_cache()
