@@ -17,3 +17,4 @@ from .effort_detector_lfeq_per_token import EffortDetectorLFEQPerToken
 from .effort_detector_lfeq_concat import EffortDetectorLFEQConcat
 from .effort_detector_query_ablation import EffortDetectorG22, EffortDetectorG23
 from .effort_detector_g25 import EffortDetectorG25
+from .effort_detector_g25v2 import EffortDetectorG25v2

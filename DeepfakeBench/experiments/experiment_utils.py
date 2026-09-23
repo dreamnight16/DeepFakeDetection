@@ -466,7 +466,8 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
                  # G25 insertion/mask/loss must survive the testall subprocess.
                  'g25_num_tokens', 'g25_insert_layer', 'g25_attention_mode',
                  'g25_supervision', 'g25_fusion_weight', 'g25_evidence_weight',
-                 'g25_diversity_weight', 'clip_pretrained_path', 'full_train_head')
+                 'g25_diversity_weight', 'clip_pretrained_path', 'full_train_head',
+                 'g25v2_aux_grad_mode', 'g25v2_score_mode')
     extra_config = {k: config[k] for k in arch_keys if k in config}
     # G25 runs also isolate testall artifacts and retain their requested seed.
     # Keep other experiments' existing command/config behavior unchanged.
