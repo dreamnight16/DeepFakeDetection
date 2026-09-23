@@ -467,7 +467,10 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
                  'g25_num_tokens', 'g25_insert_layer', 'g25_attention_mode',
                  'g25_supervision', 'g25_fusion_weight', 'g25_evidence_weight',
                  'g25_diversity_weight', 'clip_pretrained_path', 'full_train_head',
-                 'g25v2_aux_grad_mode', 'g25v2_score_mode')
+                 'g25v2_aux_grad_mode', 'g25v2_score_mode',
+                 'g26_num_tokens', 'g26_insert_layer', 'g26_mil_temperature',
+                 'g26_evidence_weight', 'g26_gate_width', 'g26_aux_max_weight',
+                 'g26_score_mode')
     extra_config = {k: config[k] for k in arch_keys if k in config}
     # G25 runs also isolate testall artifacts and retain their requested seed.
     # Keep other experiments' existing command/config behavior unchanged.
@@ -475,6 +478,8 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
         for key in ('manualSeed', 'use_mixup', 'mixup_mode', 'margin_loss_mode',
                     'use_texture_crop', 'optimizer_wrapper', 'rank_loss_weight'):
             extra_config[key] = config[key]
+    if config.get('model_name') == 'effort_g26':
+        extra_config['multi_crop'] = config.get('multi_crop', False)
     testall_metrics = run_testall(ckpt_path, test_datasets, testall_log,
                                   extra_config=extra_config,
                                   artifact_dir=config.get('testall_artifact_dir'))
