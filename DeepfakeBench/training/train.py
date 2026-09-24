@@ -43,6 +43,8 @@ parser.add_argument('--detector_path', type=str,
                     help='path to detector YAML file')
 parser.add_argument("--train_dataset", nargs="+")
 parser.add_argument("--test_dataset", nargs="+")
+parser.add_argument('--dataset_json_folder', default=None)
+parser.add_argument('--data_root', default=None)
 parser.add_argument('--no-save_ckpt', dest='save_ckpt', action='store_false', default=True)
 parser.add_argument('--no-save_feat', dest='save_feat', action='store_false', default=True)
 parser.add_argument("--ddp", action='store_true', default=False)
@@ -282,6 +284,11 @@ def main():
     # ─────────────────────────────────────────────────────────────────────────
     if config['lmdb']:
         config['dataset_json_folder'] = 'preprocessing/dataset_json_v3'
+    # Explicit E0924 metadata/image roots must survive train_config merging.
+    if args.dataset_json_folder is not None:
+        config['dataset_json_folder'] = args.dataset_json_folder
+    if args.data_root is not None:
+        config['rgb_root_override'] = args.data_root
     # create logger
     logger_path = config['log_dir']
     os.makedirs(logger_path, exist_ok=True)

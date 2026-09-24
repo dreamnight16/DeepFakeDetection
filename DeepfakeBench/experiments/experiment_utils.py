@@ -238,6 +238,10 @@ def train_model(config, train_dataset, val_dataset):
     train_py = os.path.join(_training_dir, 'train.py')
     cmd = [sys.executable, train_py, '--detector_path', yaml_path,
            '--train_dataset', train_dataset, '--test_dataset', val_dataset]
+    if config.get('e0924_protocol'):
+        cmd.extend(['--dataset_json_folder', config['dataset_json_folder']])
+        if config.get('rgb_root_override') is not None:
+            cmd.extend(['--data_root', config['rgb_root_override']])
     print(f"[train] {' '.join(cmd)}")
     sys.stdout.flush()
     proc = subprocess.run(cmd, capture_output=False)
@@ -278,12 +282,16 @@ def run_testall(ckpt_path, test_datasets, log_path, extra_config=None, artifact_
     if extra_config:
         yc.update(extra_config)
     json_folder = os.path.join(_deepfake_dir, 'preprocessing', 'dataset_json')
-    if os.path.isdir(json_folder):
+    if os.path.isdir(json_folder) and not (extra_config or {}).get('e0924_protocol'):
         yc['dataset_json_folder'] = json_folder
     with open(TMP, 'w') as f:
         yaml.dump(yc, f)
     cmd = [sys.executable, testall_py, '--detector_path', TMP,
            '--weights_path', ckpt_path, '--test_datasets'] + test_datasets
+    if (extra_config or {}).get('e0924_protocol'):
+        cmd.extend(['--dataset_json_folder', yc['dataset_json_folder']])
+        if yc.get('rgb_root_override') is not None:
+            cmd.extend(['--data_root', yc['rgb_root_override']])
     if artifact_dir is not None:
         os.makedirs(artifact_dir, exist_ok=True)
         cmd.extend(['--artifact_dir', str(artifact_dir)])
@@ -470,7 +478,12 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
                  'g25v2_aux_grad_mode', 'g25v2_score_mode',
                  'g26_num_tokens', 'g26_insert_layer', 'g26_mil_temperature',
                  'g26_evidence_weight', 'g26_gate_width', 'g26_aux_max_weight',
-                 'g26_score_mode')
+                 'g26_score_mode',
+                 'g27_num_tokens', 'g27_insert_layer', 'g27_mil_temperature',
+                 'g27_evidence_weight', 'g27_gate_width', 'g27_aux_max_weight',
+                 'g27_score_mode', 'g27_balance_weight', 'g27_router_temperature',
+                 'g27_hard_weighting', 'g27_hard_floor', 'g27_hard_width',
+                 'g27_consistency_weight', 'g27_view_contrast', 'g27_view_brightness')
     extra_config = {k: config[k] for k in arch_keys if k in config}
     # G25 runs also isolate testall artifacts and retain their requested seed.
     # Keep other experiments' existing command/config behavior unchanged.
@@ -478,8 +491,12 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
         for key in ('manualSeed', 'use_mixup', 'mixup_mode', 'margin_loss_mode',
                     'use_texture_crop', 'optimizer_wrapper', 'rank_loss_weight'):
             extra_config[key] = config[key]
-    if config.get('model_name') == 'effort_g26':
+    if config.get('model_name') in ('effort_g26', 'effort_g27'):
         extra_config['multi_crop'] = config.get('multi_crop', False)
+    if config.get('e0924_protocol'):
+        for key in ('e0924_protocol', 'dataset_json_folder', 'rgb_root_override'):
+            if key in config:
+                extra_config[key] = config[key]
     testall_metrics = run_testall(ckpt_path, test_datasets, testall_log,
                                   extra_config=extra_config,
                                   artifact_dir=config.get('testall_artifact_dir'))
