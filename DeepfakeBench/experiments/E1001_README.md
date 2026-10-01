@@ -26,6 +26,8 @@ python -u experiments/run_e1001.py \
 
 数据迁移时使用 `--dataset_json_folder`、`--rgb_root`、`--clip_pretrained_path`。默认数据位置、预处理和 LoRA 类型继承 B0 配置；加载 B0 state_dict 时严格匹配。未找到原始 B0 就报错，不回退到 G27 或重新训练。`--preflight` 仅检查 checkpoint、配置、元数据和分区，不验证图片、GPU 或训练依赖。
 
+B0 的训练配置不包含 WDF、FFIW 等测试标签，E1001 仅从项目 `test_config.yaml` 补齐缺失的 `label_dict` 项，不覆盖模型架构或预处理，也保留已有 fake 子类编号。已有标签的 real/fake 含义若与测试配置冲突，或选定元数据中有未知标签，预检立即报错。预检覆盖全部测试集的 test split，以及 FF++ 的 train/val/test。
+
 ## 结构与隔离约束
 
 ```text
@@ -93,7 +95,7 @@ python -u experiments/run_e1001.py --base_run /path/to/E0924/run \
 
 本地契约测试使用随机初始化的小 CLIP，不下载预训练模型；检查 eager/SDPA、K=1/4/8、LoRA、训练与 checkpoint reload，以及 cache-only 的决策过程。通过这些测试不能代替服务器 GPU 上的真实实验或证明增强 AUC 提升。
 
-2026-10-01 本地验证：PyTorch 2.5.1 / Transformers 4.44.2 下完整测试集 **251 passed**；PyTorch 2.9.1 / Transformers 4.57.3 下新增 G30/E1001 测试 **30 passed**。两种 LoRA 后端（项目 custom 与 loralib）均验证；流程测试替换外部应用的模型/数据入口，内部运行真实 tiny CLIP、优化器、严格导出与 checkpoint 重载，并用实际临时 LMDB 检查环境生命周期。未运行服务器真实数据或 CUDA 训练。
+2026-10-01 本地验证：PyTorch 2.5.1 / Transformers 4.44.2 下完整测试集 **255 passed**；PyTorch 2.9.1 / Transformers 4.57.3 下新增 G30/E1001 测试 **34 passed**。两种 LoRA 后端（项目 custom 与 loralib）均验证；流程测试替换外部应用的模型/数据入口，内部运行真实 tiny CLIP、优化器、严格导出与 checkpoint 重载，并用实际临时 LMDB 检查环境生命周期。预检回归测试使用项目真实 train YAML 和各测试集对应的标签/元数据结构，覆盖 WDF/FFIW 缺失标签的启动错误。未运行服务器真实数据或 CUDA 训练。
 
 ```bash
 python -m pytest tests/test_g30.py tests/test_e1001.py -q

@@ -15,10 +15,72 @@ from test_e0924 import samples
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def evaluation_metadata(dataset):
+    from test_e0924 import metadata
+
+    if dataset == "FaceForensics++":
+        return metadata()
+    labels = {"WDF": ("WDF_Real", "WDF_Fake"), "FFIW": ("FFIW_Real", "FFIW_Fake"),
+              "Celeb-DF-v2": ("CelebDFv2_real", "CelebDFv2_fake"),
+              "DeepFakeDetection": ("DFD_real", "DFD_fake"), "DFDC": ("DFDC_Real", "DFDC_Fake"),
+              "DFDCP": ("DFDCP_Real", "DFDCP_FakeA"), "DeeperForensics-1.0": ("DF_real", "DF_fake")}
+    root = {}
+    for label in labels[dataset]:
+        videos = {"001": {"label": label, "frames": [f"{dataset}/{label}/001/0.png"]}}
+        root[label] = {"test": {"c23": videos} if dataset == "DeepFakeDetection" else videos}
+    return {dataset: root}
+
+
+@pytest.fixture
+def preflight_source(tmp_path):
+    import yaml
+    from run_g25 import TEST_DS
+
+    for dataset in TEST_DS:
+        (tmp_path / f"{dataset}.json").write_text(json.dumps(evaluation_metadata(dataset)))
+    training = yaml.safe_load((ROOT / "training/config/train_config.yaml").read_text())
+    training.update(dataset_json_folder=str(tmp_path), compression="c23", train_batchSize=32,
+                    model_name="effort", use_loralib=True, full_train_head=True,
+                    mean=[.4, .5, .6], std=[.1, .2, .3], resolution=224)
+    return {"config": training}
+
+
 @pytest.fixture
 def runner(monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT / "experiments"))
     return importlib.import_module("run_e1001")
+
+
+def test_preflight_adds_wdf_and_ffiw_labels_without_changing_b0_protocol(runner, preflight_source):
+    original = json.loads(json.dumps(preflight_source["config"]))
+    assert "WDF_Real" not in original["label_dict"]
+    config, _, _ = runner.preflight(runner.build_parser().parse_args([]), preflight_source)
+    for real, fake in (("WDF_Real", "WDF_Fake"), ("FFIW_Real", "FFIW_Fake")):
+        assert config["label_dict"][real] == 0 and config["label_dict"][fake] == 1
+    for key in ("model_name", "use_loralib", "full_train_head", "mean", "std", "resolution"):
+        assert config[key] == original[key]
+    assert preflight_source["config"] == original
+
+
+def test_preflight_preserves_existing_fake_subclasses(runner, preflight_source):
+    preflight_source["config"]["label_dict"]["FF-DF"] = 7
+    config, _, _ = runner.preflight(runner.build_parser().parse_args([]), preflight_source)
+    assert config["label_dict"]["FF-DF"] == 7
+
+
+def test_preflight_rejects_a_label_with_conflicting_binary_meaning(runner, preflight_source):
+    preflight_source["config"]["label_dict"]["WDF_Real"] = 1
+    with pytest.raises(ValueError, match="WDF_Real"):
+        runner.preflight(runner.build_parser().parse_args([]), preflight_source)
+
+
+def test_preflight_rejects_unknown_metadata_labels_before_model_loading(runner, preflight_source):
+    folder = Path(preflight_source["config"]["dataset_json_folder"])
+    data = evaluation_metadata("WDF")
+    data["WDF"]["WDF_Real"]["test"]["001"]["label"] = "WDF_unknown"
+    (folder / "WDF.json").write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="WDF_unknown"):
+        runner.preflight(runner.build_parser().parse_args([]), preflight_source)
 
 
 def test_dry_run_is_new_g30_and_reuses_existing_b0_without_ml():
@@ -129,7 +191,6 @@ def test_complete_training_export_and_reload_preserves_standalone_b0(runner, tmp
     import random
     from types import SimpleNamespace
     import torch
-    from test_e0924 import metadata
     from test_g30 import TinyB0
     from e0924_export import strict_loader
     from run_g25 import TEST_DS
@@ -138,7 +199,7 @@ def test_complete_training_export_and_reload_preserves_standalone_b0(runner, tmp
     data_dir = tmp_path / "metadata"
     data_dir.mkdir()
     for dataset in TEST_DS:
-        (data_dir / f"{dataset}.json").write_text(json.dumps(metadata()))
+        (data_dir / f"{dataset}.json").write_text(json.dumps(evaluation_metadata(dataset)))
     config = {"model_name": "effort", "dataset_json_folder": str(data_dir), "compression": "c23",
               "test_batchSize": 8, "train_batchSize": 4, "label_dict": {"FF-real": 0, "FF-DF": 1},
               "std": [1., 1., 1.]}

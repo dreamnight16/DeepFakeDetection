@@ -339,10 +339,20 @@ def seed_everything(seed):
 
 
 def preflight(args, source):
+    import yaml
     from e0924_protocol import calibration_partition
     from run_g25 import TEST_DS
 
     config = dict(source["config"])
+    # B0 training configs omit evaluation-only datasets such as WDF/FFIW.
+    # Import only the label vocabulary: all architecture and input settings
+    # must still come from the exact B0 config, not the test YAML defaults.
+    config["label_dict"] = dict(config["label_dict"])
+    evaluation = yaml.safe_load((ROOT / "training/config/test_config.yaml").read_text())
+    for name, value in evaluation["label_dict"].items():
+        if name in config["label_dict"] and (config["label_dict"][name] != 0) != (value != 0):
+            raise ValueError(f"Conflicting real/fake label mapping for {name}")
+        config["label_dict"].setdefault(name, value)
     config.update(dataset_json_folder=str((args.dataset_json_folder or Path(config["dataset_json_folder"])).resolve()),
                   train_dataset=["FaceForensics++"], manualSeed=args.seed, multi_crop=False,
                   use_data_augmentation=False)
@@ -355,9 +365,22 @@ def preflight(args, source):
     validate_sampling(config["train_batchSize"], args.sampler_real_ratio)
     hashes = {}
     for dataset in TEST_DS:
-        hashes[dataset] = file_sha256(Path(config["dataset_json_folder"]) / f"{dataset}.json")
-    metadata = json.loads((Path(config["dataset_json_folder"]) / "FaceForensics++.json").read_text())
-    partition = calibration_partition(metadata, compression=config["compression"], seed=args.seed, frames=8)
+        path = Path(config["dataset_json_folder"]) / f"{dataset}.json"
+        hashes[dataset] = file_sha256(path)
+        metadata = json.loads(path.read_text())
+        # Check the same splits/compression the real dataset loader reads,
+        # before any model loading or inference can consume GPU time.
+        splits = ("train", "val", "test") if dataset == "FaceForensics++" else ("test",)
+        for label_splits in metadata[dataset].values():
+            for split in splits:
+                videos = label_splits[split]
+                if dataset in ("FaceForensics++", "DeepFakeDetection"):
+                    videos = videos[config["compression"]]
+                for info in videos.values():
+                    if info["label"] not in config["label_dict"]:
+                        raise ValueError(f"{dataset}/{split}: label {info['label']} is not in label_dict")
+        if dataset == "FaceForensics++":
+            partition = calibration_partition(metadata, compression=config["compression"], seed=args.seed, frames=8)
     if any({r["label_name"] == "FF-real" for r in rows} != {True, False}
            for rows in partition["records"].values()):
         raise ValueError("Both calibration partitions require real and fake videos")
