@@ -17,7 +17,7 @@
 | 新专家没有形成可信互补 | G18 高度冗余，G30 balance 均匀后 token 分数仍相关；外域分歧时 expert 可靠性降低 | 不继续扩张无角色监督的 token；增加同源关系/空间监督，配套打乱监督对照 |
 | 辅助输出误伤原正确排序 | E1002 新分数修复部分真假对，同时损伤更多对 | 使用 training-only 软排序保留；同时记录修复、损伤和净 AUC |
 | 监督量和视频目标错位 | G9 用单个 fake logit；旧选点多用 frame AUC；G12 非概率分数套 0.5 | 所有候选统一视频概率均值，并在其单调对应分数上训练排序 |
-| 输入覆盖与对应关系不可靠 | 原 loader 先截断列表再计算采样，实际取元数据前若干帧；不同方法公共帧很少 | 从完整元数据建立新清单；同输入重测 B0；配对依赖谱系和时间审计 |
+| 输入覆盖与对应关系不可靠 | 原 loader 先截断列表再计算采样，实际取元数据前若干帧；不同方法公共帧很少 | 从完整元数据建立新清单；同输入重测 B0；按官方谱系与预处理原帧索引自动核对图片 |
 
 共同工作假说是：现有新增模块/再拟合充分优化了 FF++ 的区分规律，却未证明它们获得了可迁移的新判别依据或保留了原 B0 的域外排序。具体依赖身份、背景、压缩或裁剪尚无因果定位。E1005 同时安排性能候选与能否证该解释的对照。
 
@@ -49,21 +49,23 @@
 
 所有新数据处理放在 E1005 独立入口/清单生成器；设计不要求覆盖历史 loader、旧清单、旧结果或 B0 权重。
 
-### 3.2 配对前置审计
+### 3.2 默认自动核对同目标、同原帧索引图片
 
 本地完整 FF++ 元数据为 [FaceForensics++.json](/Users/mengyeshiliu/code/ai/DeepFakeDetection/DeepfakeBench/preprocessing/dataset_json/FaceForensics++.json)，24,232,737 bytes，SHA256=`459fc9891f0bf6e63a1a7d61aed6e96edcc623701d05726b5a225d6fa0cb0b27`，与 E1002 manifest 一致。当前只有 c23，多数视频列出 32 张已提取帧。
 
 [FF++ 官方命名](https://github.com/ondyari/FaceForensics/blob/master/dataset/README.md) 是 `<target sequence>_<source sequence>`。保存有序 target/source 两端；旧 `source_ids()` 的无序集合只可用于保守泄漏分组，不能代替配对谱系。
 
-当前 train 公共数值帧交集审计：DF 719 个视频均至少 14 个；F2F 719 个中 703 个不足 8 个，中位数 3；FS 720 个中 351 个不足 8 个且 1 个缺少目标 real；NT 719 个中 351 个不足 8 个。这些是候选帧对应，**相同编号仍不证明相同像素裁剪或准确时间**。
+当前 train 公共数值帧交集审计：DF 719 个视频均至少 14 个；F2F 719 个中 703 个不足 8 个，中位数 3；FS 720 个中 351 个不足 8 个且 1 个缺少目标 real；NT 719 个中 351 个不足 8 个。这些数量仅来自元数据候选，实际图片不存在、损坏或索引不符时还会排除。**相同编号不证明相同像素裁剪或物理时间戳。**
 
-配对训练默认每视频 T=2 个已确认共同时间点，避免假定所有方法有 8 帧配对。顺序：核实 official target/source → 查对应 real → 数字索引交集 → 验证 FPS/时间关系和目标人脸 → 从合格交集取样。禁止 zip 列表、近邻帧号代替精确对齐或静默跳样本。无法确认者可参与普通图像分类，但不能进入 M/S 配对比较集合。
+仓库 [preprocess.py](/Users/mengyeshiliu/code/ai/DeepFakeDetection/DeepfakeBench/preprocessing/preprocess.py:284) 用原视频 `cnt_frame` 保存 `frames/<video>/<cnt_frame:03d>.png`，检测失败只跳过，不重新编号；同 stem 的 landmark 是 `landmarks/<video>/<cnt_frame:03d>.npy`。因此默认流程不要求找回原视频、FPS 或手工核实全部 pair：官方 target/source → 对应 real → 数字索引交集 → 实际 PNG 路径/索引匹配与解码 → 从合格交集取样。不会用 zip 列表或近邻编号冒充对应关系。可选 landmark 记录存在、解码和同 stem 状态，不作为核心配对的必需资产或身份验证。
 
-T=2的候选train纳入上限仍只有DF719/719、F2F589/719、FS654/720、NT654/719，时间/人脸审计后可能更少；不是完整四方法无偏配对数据。B采用方法等权、目标来源去重的固定episode清单，每方法的源视频曝光次数单列。在每个合格pair的完整交集上分成前/后两个rank区间，每次从各区间抽一个索引；预先用seed1024物化全部episode并共享给所有B臂，让不同更新覆盖不同共同帧。不能始终只训练两个端点。
+默认每视频 T=2 个合格公共原帧索引，避免假定所有方法有 8 帧配对。自动报告明确记为**同目标、同原始帧索引配对**，不独立验证 timestamp、实际身份或逐像素严格对齐，也不把它称为精确反事实。real/fake 分别检测最大脸、对齐和裁剪，多脸或额外生成的图片可能需要异常抽查。已有额外人工证据时，原 schema1 `--pair_audit` 可选且优先；其 `time_verified`/`target_face_verified` 仍由实际证据支持，自动报告不代填这些标志。`--no_auto_pair_audit` 可关闭自动配对，保留不依赖配对的控制。
 
-按方法公布纳入/排除数量、内容来源、原始/合格索引分布。B 的全部 21 臂与对应普通 CE 控制只用同一合格集合；DF 子集 pilot 与四方法完整比赛分别报告，不将较容易的 DF-only 结果冒充全 FF++。若某方法无法提供足够正确配对，先从可信原视频统一重新提取；不得直接宣布其不存在伪造信号。
+T=2的候选train纳入上限仍只有DF719/719、F2F589/719、FS654/720、NT654/719，实际图片检查后可能更少；不是完整四方法无偏配对数据。B采用方法等权、目标来源去重的固定episode清单，每方法的源视频曝光次数单列。在每个合格pair的完整交集上分成前/后两个rank区间，每次从各区间抽一个索引；预先用seed1024物化全部episode并共享给所有B臂，让不同更新覆盖不同共同帧。不能始终只训练两个端点。
 
-real/fake 原预处理可能独立选最大脸、对齐/裁剪。因此单纯图像级排序可使用审计过的同一原视频时间关系；像素差分、mask、局部对比还必须共享或显式记录 crop 坐标变换。
+按方法公布纳入/排除数量、内容来源、原始/合格索引分布和文件异常。B 的全部 21 臂与对应普通 CE 控制只用同一合格集合；DF 子集 pilot 与四方法完整比赛分别报告，不将较容易的 DF-only 结果冒充全 FF++。某方法不足以构成固定 episode 时记录前置条件不足，检查已提取图片和元数据，不要求只有图片的用户先补原视频；不得直接宣布其不存在伪造信号。
+
+单纯图像级排序使用上述同目标/原帧索引关系。mask 注册是 fake RGB 与它自己的 mask：预处理脚本对二者施加同一裁剪变换，并保存同帧号的 `masks/*.png`；不是 real/fake 两张 crop 的逐像素配准。若未来添加真假像素差分或局部对应损失，仍须另行建立共享或可追溯的 crop 变换。
 
 ### 3.3 数据职责与泄漏边界
 
@@ -200,7 +202,7 @@ D1–D4最终读取student原pooler/原头；可写作`m=m0+alpha(m_student-m0)`
 
 ## 10. E：六个条件取证与分辨率配置
 
-当前本地没有可检查的真实 RGB/mask/landmark/mp4资产。元数据列出masks不等于存在有效监督。原mask/landmark读取器可能缺失后返回零，E1005必须使用严格资源审计和失败机制。
+资产以服务器实际图片检查为准，元数据列出 masks 不等于存在有效监督。原 mask/landmark 读取器可能缺失后返回零，E1005 使用严格解码和覆盖检查。没有显式 `--asset_audit` 时，自动登记同 fake 预处理路径、同帧号且与 RGB 同尺寸的可解码 mask；按实际合格覆盖启用对应臂。显式资产 receipt 优先于自动结果。landmark 是可选诊断，不要求用户另行准备视频。
 
 像素分支原型为Conv3→32→64→128→128（3×3，stride2/2/2/1，无bias，各层affine GroupNorm），mask head128→1，以及两个含bias的零初始化1×1投影128→1024，在student第8/12 block之后注入patch；原student参数与头冻结。按以上层计算原型505,505参数，以实现实际计数为准。推理始终image-only，不读取测试GT mask选择ROI。
 
@@ -213,9 +215,9 @@ D1–D4最终读取student原pooler/原头；可写作`m=m0+alpha(m_student-m0)`
 | E5_INTERPOLATED_448 | E6同一原生crop先下采样224再上采样448；同E1模块 | 与E6同crop、模块、loss、输出接口；记录计算量 |
 | E6_NATIVE_448 | 同原始帧/同人脸框的原生448细节输入；B0取同一原生crop下采样224 | 可信原视频/原图实际提供新细节及共享crop变换 |
 
-mask不是空数组就算合格：需校验标签、尺寸、坐标、变换、有效区域和合理空mask比例。真实样本的mask负监督明确。空间head输出按实际分辨率用area将注册mask下采样为软目标；边界由224空间mask的3×3膨胀减腐蚀生成，再area下采样。这里不额外添加未定义的局部contrastive损失。mask生成边界不是所有方法都具有的可迁移线索，只能由E2/E3/E4与最终视频增益验证。
+mask不是空数组就算合格：需校验预处理路径与同帧号、解码、RGB尺寸、有效区域和合理空mask比例；自动注册依据是仓库脚本对 fake RGB/mask 共用变换，不独立证明图片之外的坐标 provenance。真实样本的mask负监督明确。空间head输出按实际分辨率用area将注册mask下采样为软目标；边界由224空间mask的3×3膨胀减腐蚀生成，再area下采样。这里不额外添加未定义的局部contrastive损失。mask生成边界不是所有方法都具有的可迁移线索，只能由E2/E3/E4与最终视频增益验证。
 
-原预处理默认输出256 crop，将其放大到448不能归因于新增细节；E6在资产不满足时记录`NOT_ELIGIBLE_ASSET`。E5/E6都建立native-crop专用清单，并重算同crop224的B0；原存储crop的B0不能用于纯细节归因。只有锁定六域视频/帧均有合格原生资产时，E6才可进入六域突破判定；仅部分来源可用时报告该子集结果，不能冒充完整比赛。不能用假高分辨率臂占据“已跑完”的数量。
+原预处理默认输出256 crop，将其放大到448不能归因于新增细节；自动资产 receipt 的 `native_crops` 留空。E6仍要求额外显式原生资产证据，不满足时记录`NOT_ELIGIBLE_ASSET`。E5是E6的同crop控制，也要求该原生资产，不能改成任意256图片放大448。E5/E6都建立native-crop专用清单，并重算同crop224的B0；原存储crop的B0不能用于纯细节归因。只有锁定六域视频/帧均有合格原生资产时，E6才可进入六域突破判定；仅部分来源可用时报告该子集结果，不能冒充完整比赛。不能用假高分辨率臂占据“已跑完”的数量。
 
 ## 11. 冠军锁定、突破判定与复现
 
@@ -253,7 +255,7 @@ mask不是空数组就算合格：需校验标签、尺寸、坐标、变换、�
 
 现有入口为`experiments/run_e1005.py`，新运行输出独立`experiment_results/E1005/seed1024_<时间>_<pid>`。默认按G31–G36顺序请求50个目录槽位；实际可训练、复用和不适用数量由前置审计及训练签名决定。
 
-当前保存`manifest.json`/`runtime_config.json`中的代码、配置、数据、receipt、B0与运行环境身份，`experiment_catalog.json`及输入/配对/排除/资产审计；各arm的训练签名、实际参数量、step快照、history和四种选择；最终`champion_lock.json`、独立B0与候选预测、`evaluation.json`、`analysis.csv`及相同seed复现对比。快照仅保存可训练state和新增buffer，重建绑定原B0/预训练来源。逐阶段训练/导出进度与总训练耗时已有记录；参数逐项名单、独立验证/导出资源统计及FLOPs/峰值显存等尚不能当作已完成的服务器测量。
+当前保存`manifest.json`/`runtime_config.json`中的代码、配置、数据、receipt、自动图片报告、B0与运行环境身份，`experiment_catalog.json`及输入/配对/排除/资产审计；自动产物为`image_pair_audit.json`、`auto_image_pairs.json`、`auto_asset_receipt.json`；各arm的训练签名、实际参数量、step快照、history和四种选择；最终`champion_lock.json`、独立B0与候选预测、`evaluation.json`、`analysis.csv`及相同seed复现对比。快照仅保存可训练state和新增buffer，重建绑定原B0/预训练来源。逐阶段训练/导出进度与总训练耗时已有记录；参数逐项名单、独立验证/导出资源统计及FLOPs/峰值显存等尚不能当作已完成的服务器测量。
 
 进度要求覆盖初始化、资源核查、B0缓存、当前配置序号/总数、train step/预算、开发评测、checkpoint保存、最终导出与失败摘要；统一flush并写run.log及progress.json。不能再次在B0缓存期间长期只留下启动两行。
 
@@ -276,17 +278,17 @@ E1005的首要产出是有效、可复现的基线以上模型及可解释对照
 | 当前家族 | 原设计 | 槽位 | 实施状态 |
 | --- | --- | ---: | --- |
 | G31 | A | 6 | 更新位置/初始化诊断 |
-| G32 | B | 21 | H/L/J × V/S/M/MK/MG/MN/MKGN监督矩阵；要求已核实配对 |
+| G32 | B | 21 | H/L/J × V/S/M/MK/MG/MN/MKGN监督矩阵；要求自动图片核对或显式人工 receipt 的合格配对 |
 | G33 | R | 3 | 冷启动强基线；记录继承预算核实状态 |
 | G34 | C | 6 | 从G32开发leader派生；缺少待消融因素记NOT_APPLICABLE；同签名复用 |
 | G35 | D | 8 | 内部层/表示候选；使用同一G32 leader监督；部分臂要求原始CLIP |
 | G36 | E | 6 | 像素控制及mask/原生分辨率；对应资产不合格时记NOT_ELIGIBLE_ASSET |
 
-代码已具备metadata候选审计、显式time/target-face receipt核验、注册空间资产检查、immutable B0、固定episode、训练/选点、冠军锁定、同输入普通控制、历史六域终评、配对排序损益、bootstrap及相同seed复现。CPU tiny CLIP/fixture验证覆盖50目录路线、真实微型优化器训练、checkpoint重载、标准/native输入控制、repeat/resume、缺receipt状态和单arm失败后继续；Torch2.5.1/Transformers4.44.2与Torch2.9.1/Transformers4.57.3两版本CPU验证及独立代码审查已通过。正式GPU吞吐、显存及真实数据效果尚未测量，两版本CPU通过不构成真实CUDA性能验证。
+实施范围包括metadata候选、默认预处理图片核对、可选显式time/target-face receipt、注册空间资产检查、immutable B0、固定episode、训练/选点、冠军锁定、同输入普通控制、历史六域终评、配对排序损益、bootstrap及相同seed复现。原实现的CPU tiny CLIP/fixture验证覆盖50目录路线、真实微型优化器训练、checkpoint重载、标准/native输入控制、repeat/resume、缺配对状态和单arm失败后继续；Torch2.5.1/Transformers4.44.2与Torch2.9.1/Transformers4.57.3两版本CPU验证及独立代码审查已通过。此次默认自动核对更新需以对应回归验证记录为准。正式GPU吞吐、显存及真实数据效果尚未测量，两版本CPU通过不构成真实CUDA性能验证。
 
-`--audit_metadata`和`--preflight`不加载模型/图片，不能据此确认CUDA、资产注册或目标人脸。生成模板的time/target-face标志为false，只有在实际证据审计后才能生成已核实receipt；不能批量改true。没有已核实配对时，依赖配对/leader的臂记录前置条件不合格。`--asset_audit`在训练运行中进一步解码并核对实际文件；推理始终不读取测试GT mask。
+`--audit_metadata`只读元数据；`--audit_images`不载B0模型，自动核对预处理图片与同路径mask；`--preflight`验证B0来源/文件身份和元数据，默认执行训练图片核对但不加载CUDA模型。普通启动不要求手工receipt或原视频。显式schema1配对/资产receipt优先；其人工time/target-face标志仍不得由同编号图片直接代填。关闭自动配对且没有显式receipt，或合格集合不足时，依赖配对/leader的臂记录前置条件不合格。自动图片关系不独立证明timestamp、身份或逐像素严格对齐；推理始终不读取测试GT mask。
 
-进度同步flush到终端、`run.log`，并原子更新`progress.json`；nohup重定向日志另含启动和错误信息。`--resume`只复用身份/签名/hash一致的已完成arm与B0缓存，并重新检查条件资产；中断或失败arm从step=0重跑，不恢复optimizer/RNG中途状态。代码、数据、配置、环境或receipt变化时拒绝作为同一run恢复。
+进度同步flush到终端、`run.log`，并原子更新`progress.json`；nohup重定向日志另含启动和错误信息。`--resume`只复用身份/签名/hash一致的已完成arm与B0缓存，并重新检查图片/条件资产及自动报告hash；中断或失败arm从step=0重跑，不恢复optimizer/RNG中途状态。代码、数据、配置、环境、receipt或图片审计变化时拒绝作为同一run恢复。此次源码更新后，旧版本run应新开目录，不能沿用旧身份resume。
 
 当前bootstrap实现为各历史域内真假分层的配对**视频**重采样，再计算六域macro差；没有已审计来源聚类可用，采用视频独立近似，并在报告中明列。来源成组bootstrap仍是资产核实后的统计升级，不能将现实现称作来源成组推断。六域是已反复查看的历史回归面板；相同1024重跑只验证复现，不估计跨seed波动，也不提供新来源确认。
 

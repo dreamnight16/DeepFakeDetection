@@ -72,6 +72,16 @@ def test_complete_registered_assets_are_audited_with_exact_file_identities(tmp_p
     assert all(len(row["sha256"]) == 64 for row in report["audited_identities"]["native"])
 
 
+def test_absent_native_mapping_does_not_expand_missing_entries_over_the_full_panel(tmp_path):
+    _, pairs, receipt = fixture(tmp_path)
+    receipt["native_crops"] = {}
+    evaluation = [{"frames": [f"unavailable/{index}.png" for index in range(1000)]}]
+    report = load("e1005_assets").audit_assets(receipt, pairs, evaluation, tmp_path, 8, 16)
+    assert report["mask"]["eligible"]
+    assert not report["native"]["eligible"]
+    assert len(report["native"]["failures"]) == 1
+
+
 def test_grayscale_rgb_mask_is_valid_but_color_semantics_are_rejected(tmp_path):
     _, pairs, receipt = fixture(tmp_path)
     assets = load("e1005_assets")

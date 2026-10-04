@@ -1,11 +1,10 @@
 # E1005：G31–G36 服务器运行
 
-在 `DeepfakeBench` 目录、原训练环境中执行。下列命令复用 E0924 的 **G26_B0**，不覆盖原 checkpoint。配对 receipt 必须先按下一节审计，保存为 `pair_audit_verified.json`。
+在 `DeepfakeBench` 目录、原训练环境中执行。下列命令复用 E0924 的 **G26_B0**，不覆盖原 checkpoint；默认自动核对 FF++ 预处理图片，不需要原视频或手工配对文件。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1005.py \
   --base_run ./experiment_results/E0924/seed1024_20260930_110618_353460_2771190 \
-  --pair_audit ./experiment_results/E1005/audit/pair_audit_verified.json \
   --seed 1024 > nohup_E1005.log 2>&1 &
 ```
 
@@ -17,33 +16,50 @@ tail -f nohup_E1005.log
 
 当前实现已具备训练、选点、隔离检查、最终导出和复现入口；已通过 Torch2.5.1/Transformers4.44.2 与 Torch2.9.1/Transformers4.57.3 的 CPU tiny CLIP/fixture 验证及独立代码审查。**尚未正式运行服务器真实数据/GPU 训练，也未证实超过 B0**；两版本 CPU 验证不等于真实 CUDA 性能验证。
 
-## 先审计，再使用配对/空间资产
+## 自动核对预处理图片
 
-不加载 B0 或模型，先产生元数据候选和未核实 receipt 模板：
+启动时自动按 FF++ 官方 `<target>_<source>` 命名找到目标 real 视频，再按 `preprocessing/preprocess.py` 保存的原始 `cnt_frame` 数字索引取交集，检查图片是否存在、可解码及索引是否匹配。检测失败只跳过该帧，脚本不会重新编号。每对至少两个合格公共索引；按方法记录纳入、排除与异常原因。配对 episode 仍须能够覆盖 DF、F2F、FS、NT 四种方法和四个不同 target。
+
+这个依据是**同目标、同原始帧索引的图片配对**。它不独立验证物理时间戳、实际身份或逐像素严格对齐。真假视频分别选择最大脸并对齐裁剪；多脸、错脸或另外生成的图片仍可能需要抽查。可选的同 stem `landmarks/*.npy` 会核对并记录，缺少 landmark 不阻止核心实验；也不会用 landmark 存在来替代身份验证。
+
+自动检查只调整配对集合中的公共索引，不自动清洗全部训练或评测清单。G31/G33 普通帧训练仍沿用原清单；如果其中有坏图，会按已有失败记录机制报告该臂的错误。
+
+可选：训练前单独检查图片，不加载 B0 模型：
+
+```bash
+python experiments/run_e1005.py --audit_images \
+  --dataset_json_folder ./preprocessing/dataset_json \
+  --rgb_root /path/to/preprocessed_rgb_root
+```
+
+将 `--rgb_root` 替换为服务器上与原训练配置一致的图片根目录；已有 B0 配置时也可用 `--base_run` 提供路径。输出到 `experiment_results/E1005/audit/`：`input_manifests.json`、`pair_candidates.json`、`image_pair_audit.json`、`auto_image_pairs.json`、`auto_asset_receipt.json`。后续普通启动会自动重新核对，不要求手工将报告改成已核实 receipt。
+
+仅查看元数据候选，不读图片：
 
 ```bash
 python experiments/run_e1005.py --audit_metadata \
   --dataset_json_folder ./preprocessing/dataset_json
 ```
 
-输出到 `experiment_results/E1005/audit/`：`input_manifests.json`、`pair_candidates.json`、`pair_audit_template.json`。`--audit_metadata` 可列出缺失的外域 JSON；这只能形成候选审计。正式运行需要完整 FF++、CDF-v2 和历史六域元数据及可读图片。
+`--audit_metadata` 输出元数据清单、候选和可选人工 receipt 模板，可列出缺失的外域 JSON；它不会检查图片。正式运行需要完整 FF++、CDF-v2 和历史六域元数据及可读图片。
 
-模板里的 `time_verified=false`、`target_face_verified=false` 不能批量改成 true 来跳过核查。对保留条目逐项核实 target/source 谱系、同一时刻和实际目标人脸，记录非空 `evidence`、唯一 `receipt_id`，仅保留至少两个已核实公共索引，另存 `pair_audit_verified.json`。未确认的条目从已核实 receipt 中排除；公共帧编号或相同文件名不构成时间/人脸证据。配对 episode 必须包含四种伪造方法和四个不同 target 来源，实际匹配失败会报错。
+已有额外人工核对证据时，可继续传 `--pair_audit /path/to/pair_audit_verified.json`；显式 schema1 receipt 优先于自动配对。人工模板里的 `time_verified=false`、`target_face_verified=false` 仅在对应证据确实核实时才改为 true，并填写非空 `evidence` 和唯一 `receipt_id`。默认自动图片审计使用独立报告，不把这些人工确认标志自动改成 true。若只想跑不依赖配对的控制，加 `--no_auto_pair_audit`；没有显式人工 receipt 时，依赖配对/leader 的臂会记录前置条件不足。
 
 同时核对 B0 配置/文件和全部元数据：
 
 ```bash
 python experiments/run_e1005.py \
   --base_run ./experiment_results/E0924/seed1024_20260930_110618_353460_2771190 \
-  --pair_audit ./experiment_results/E1005/audit/pair_audit_verified.json \
   --preflight
 ```
 
-`--preflight` 验证原 B0 来源和元数据/receipt 身份；不加载模型，不验证图片、CUDA 或完整训练环境。`METADATA_OK` 不表示 GPU 训练就绪，也不表示配对已由程序独立证明。
+`--preflight` 验证原 B0 来源、元数据及配对身份，默认还会自动检查训练图片；不加载模型，不验证 CUDA 或完整训练环境。预检成功表示这些文件与配对条件通过，不能扩大解释为时间戳、身份、逐像素对齐或 GPU 训练性能已验证。
 
-G36 的 mask/原生分辨率另需 `--asset_audit /path/to/asset_audit.json`。schema 为 `schema_version=1`、非空 `receipt_id`，以及按原 RGB canonical path 索引的 `registered_masks` / `native_crops` 映射。每个条目含资产 `path` 和证据 `evidence`；mask 需 `coordinates_verified`，native crop 需 `same_frame_verified`、`crop_verified`、`native_verified`。这些标志也必须来自实际审计。
+未传 `--asset_audit` 时，自动检查 fake 图片相同预处理路径下同帧号的 `masks/*.png`：可解码、与对应 RGB 尺寸一致的 mask 按同一脚本裁剪变换登记到 `auto_asset_receipt.json`。不存在或不合格的 mask 会记录原因；只有实际覆盖条件满足时才启用 G36 对应监督。图片配对不证明 real/fake 两张 crop 逐像素注册，mask 注册仅指 **fake RGB 与其自己的 mask**。
 
-运行时会解码资产、核对尺寸/身份并保存 `asset_audit_result.json`。mask 必须与训练 RGB 注册，全为空的 fake mask 集合不合格；native crop 原像素边长须至少为配置的 448，且覆盖已核实训练帧、开发集及完整历史六域。推理不读取测试 GT mask。缺资产时阻止对应臂，不能用零 mask 或插值图冒充原生细节；`G36_PIXEL_224` 不要求空间资产，但仍要求已核实配对及 G32 leader。
+已有额外空间资产时可传 `--asset_audit /path/to/asset_audit.json`，显式 receipt 优先。schema 为 `schema_version=1`、非空 `receipt_id`，以及按原 RGB canonical path 索引的 `registered_masks` / `native_crops` 映射。每个条目含资产 `path` 和证据 `evidence`；mask 需 `coordinates_verified`，native crop 需 `same_frame_verified`、`crop_verified`、`native_verified`。显式人工标志必须来自实际证据。
+
+运行时会解码资产、核对尺寸/身份并保存 `asset_audit_result.json`。mask 必须与训练 fake RGB 注册，全为空的 fake mask 集合不合格；推理不读取测试 GT mask。自动 receipt 的 `native_crops` 留空：默认 256×256 crop 不当作原生 448。`G36_NATIVE_448` 及其同 crop 控制 `G36_INTERPOLATED_448` 仍要求显式原生资产证据、至少 448 的实际像素边长，并覆盖合格训练帧、开发集和完整历史六域。缺资产时阻止对应臂；`G36_PIXEL_224` 不要求空间资产，但仍要求合格配对及 G32 leader。
 
 ## G 编号与最多 50 个槽位
 
@@ -75,7 +91,7 @@ python experiments/run_e1005.py --dry_run
 
 ## 预算、评测与复现
 
-默认 warm-start 追加 `--steps 5750`、有效图像 batch=32，配对 episode 固定每视频两个有效公共时间点、两视图；`--train_frames 8` 不会将配对 episode 扩成八帧。评测清单从完整已提取元数据数字排序、均匀选最多八帧，短视频不重复帧凑数；同输入 B0 重新推理，不能沿用历史 93.653% 作为新采样门槛。
+默认 warm-start 追加 `--steps 5750`、有效图像 batch=32，配对 episode 固定每视频两个合格公共原帧索引、两视图；`--train_frames 8` 不会将配对 episode 扩成八帧。评测清单从完整已提取元数据数字排序、均匀选最多八帧，短视频不重复帧凑数；同输入 B0 重新推理，不能沿用历史 93.653% 作为新采样门槛。
 
 G33 总预算默认等于已审计 B0 选中更新数＋追加预算。runner 尝试从确实保存该 checkpoint 的训练日志解析零起始 step，并加一转换为完成更新数；无法核实时记录 unknown。仅在已有可信证据时传 `--base_selected_steps`；`--cold_steps` 是显式预算，不能独自证明与 B0 总曝光匹配。未知/不足预算的结果不会通过正式突破预算门槛。
 
@@ -94,7 +110,7 @@ G33 总预算默认等于已审计 B0 选中更新数＋追加预算。runner �
 每次新运行写到 `experiment_results/E1005/seed1024_<时间>_<pid>/`：
 
 - 终端/`nohup_E1005.log`：启动、模型加载、进度及错误；`run.log` 追加已 flush 的进度行，`progress.json` 原子替换当前阶段、G ID、数据集、step、预算、耗时等。
-- `manifest.json`、`runtime_config.json`：B0/config/code/metadata/receipt/运行环境身份及原 B0 state/file 隔离结果；`experiment_catalog.json`、`input_manifests.json`、`pair_candidates.json`、`verified_pairs.json`、`asset_audit_result.json`：目录和审计依据。
+- `manifest.json`、`runtime_config.json`：B0/config/code/metadata/receipt/自动图片报告/运行环境身份及原 B0 state/file 隔离结果；`experiment_catalog.json`、`input_manifests.json`、`pair_candidates.json`、`image_pair_audit.json`、`auto_image_pairs.json`、`auto_asset_receipt.json`、`verified_pairs.json`、`asset_audit_result.json`：目录和审计依据。
 - `B0_uniform/`、`B0_legacy_prefix8/`，合格原生资产时另有 `B0_native/`：绑定输入/哈希的独立基线缓存。原生臂与普通控制统一使用该 native crop 导出的 global224 输入。
 - `<G_ID>/checkpoints/step*.pth`、`history.json`、`result.json`：可训练 state/新增 buffer 快照、四种选点和实际参数/步数/训练耗时；最终评估子集另有 `exports/*.npz`。
 - `champion_lock.json`、`all_results.json`、`analysis.csv`、最终 `evaluation.json`、`reproductions/`：冠军、全部状态、六域比较、bootstrap 和复现。
@@ -106,10 +122,9 @@ G33 总预算默认等于已审计 B0 选中更新数＋追加预算。runner �
 ```bash
 CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1005.py \
   --resume ./experiment_results/E1005/seed1024_<原运行目录> \
-  --pair_audit ./experiment_results/E1005/audit/pair_audit_verified.json \
   --seed 1024 > nohup_E1005_resume.log 2>&1 &
 ```
 
-替换为真实 run 目录，并重复原运行使用过的 `--arms`、数据路径、receipt、训练参数和 asset 参数。`--resume` 可从 manifest 恢复 B0/config 路径；不会自动还原全部 CLI 覆盖。源码、配置、环境、元数据/receipt、B0 或训练身份改变时拒绝复用。
+替换为真实 run 目录，并重复原运行使用过的 `--arms`、数据路径、自动核对开关、可选 receipt、训练参数和 asset 参数。`--resume` 可从 manifest 恢复 B0/config 路径；不会自动还原全部 CLI 覆盖。恢复时重新检查图片并核对自动报告 hash；源码、配置、环境、元数据/receipt、图片审计、B0 或训练身份改变时拒绝复用。**此次自动核对入口更新改变了源码身份，旧版本 run 不能直接 `--resume`，应启动新的 E1005 run。**
 
 **恢复仅复用已完成且签名/checkpoint 哈希一致的 `OK`/`REUSED` arm 和基线缓存；中断/失败 arm 从 step=0 重跑。** 当前快照不保存 optimizer/RNG 中途状态，不支持断点续训。已锁定冠军不能因后来结果而更换。

@@ -2,7 +2,8 @@
 
 Metadata operations use only the standard library. Torch, Pillow and optional
 OpenCV are imported when constructing/reading tensor datasets. Filename lineage
-and equal numeric indices define candidates, never verified time/face alignment.
+and original numeric indices support image pairing under the preprocessing
+contract; independent time/face verification uses optional manual receipts.
 """
 
 from collections import Counter
@@ -294,6 +295,10 @@ def _nuisance(kind, rng):
 
 def build_episodes(pairs, steps, seed=1024, frames=2):
     """Materialize train-only four-method episodes with distinct target sources.
+
+    Audited pair identities may come from the image/frame-index contract or a
+    stronger manual time/face receipt. ``verified`` alone is not proof of exact
+    timestamp, face identity, or pixel correspondence; retain pairing metadata.
 
     Each pair cycles shuffled indices in the first/second half of its *whole*
     audited intersection. Exposure-aware matching balances pairs within methods.

@@ -91,7 +91,7 @@ def _train_paths(pairs):
         raise ValueError("No verified training pairs for conditional assets")
     for pair in pairs:
         if pair.get("verified") is not True or not pair.get("audit_receipt_id"):
-            raise ValueError("Conditional assets require verified time/target-face pairs")
+            raise ValueError("Conditional assets require audited FF++ pair identities")
         if pair["real"]["label"] != 0 or pair["fake"]["label"] != 1:
             raise ValueError("Conditional asset pair labels must be real/fake")
         for role in ("real", "fake"):
@@ -146,7 +146,8 @@ def audit_assets(receipt, pairs, eval_manifests, rgb_root, global_resolution=224
     try:
         receipt, signature = _receipt(receipt)
         fake_paths, native_paths = _train_paths(pairs)
-        native_paths.update(_eval_paths(eval_manifests))
+        if receipt["native_crops"]:
+            native_paths.update(_eval_paths(eval_manifests))
     except (ValueError, OSError, KeyError) as error:
         for family in ("mask", "native"):
             result[family]["reason"] = str(error)
@@ -154,7 +155,11 @@ def audit_assets(receipt, pairs, eval_manifests, rgb_root, global_resolution=224
     result.update(receipt_id=receipt["receipt_id"], receipt_sha256=signature,
                   global_resolution=global_resolution, native_resolution=native_resolution)
     failures = {"mask": [], "native": []}
-    for path in fake_paths:
+    if not receipt["registered_masks"]:
+        failures["mask"].append({"reason": "Registered training masks unavailable"})
+    if not receipt["native_crops"]:
+        failures["native"].append({"reason": "Registered native crops unavailable; existing 256 crops are not native448"})
+    for path in fake_paths if receipt["registered_masks"] else ():
         try:
             _, entry = _registered(receipt, path, "registered_masks")
             mask = _image_details(rgb_root, entry["path"], mask=True)
@@ -162,10 +167,11 @@ def audit_assets(receipt, pairs, eval_manifests, rgb_root, global_resolution=224
             if (mask["width"], mask["height"]) != (rgb["width"], rgb["height"]):
                 raise ValueError(f"Registered mask/RGB crop dimensions disagree: {path}")
             result["audited_identities"]["mask"].append({"frame_path": path, **mask,
-                "rgb_sha256": rgb["sha256"], "evidence": entry["evidence"]})
+                "rgb_sha256": rgb["sha256"], "evidence": entry["evidence"],
+                "verification_mode": entry.get("verification_mode", "explicit_receipt")})
         except (ValueError, OSError) as error:
             failures["mask"].append({"frame_path": path, "reason": str(error)})
-    for path in sorted(native_paths):
+    for path in sorted(native_paths) if receipt["native_crops"] else ():
         try:
             _, entry = _registered(receipt, path, "native_crops")
             native = _image_details(rgb_root, entry["path"])

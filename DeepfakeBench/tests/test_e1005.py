@@ -179,8 +179,27 @@ def test_ordinary_comparison_uses_the_strongest_reference_without_switching_cham
 import pytest
 
 
-@pytest.mark.parametrize("native_champion", [False, True])
-def test_all_numbered_families_use_real_tiny_clip_training_and_exports(tmp_path, monkeypatch, native_champion):
+@pytest.mark.parametrize("mode", ["--audit_metadata", "--audit_images"])
+def test_model_free_audit_does_not_require_model_normalization(mode, tmp_path):
+    runner = importlib.import_module("run_e1005")
+    config_path = tmp_path / "metadata_only.json"
+    config_path.write_text(json.dumps({"label_dict": {"FF-real": 0}}))
+    args = runner.build_parser().parse_args([mode, "--base_config", str(config_path)])
+    config = runner._config(args)
+    assert "mean" not in config and "std" not in config
+
+
+def test_training_still_requires_the_original_normalization(tmp_path):
+    runner = importlib.import_module("run_e1005")
+    config_path = tmp_path / "missing_normalization.json"
+    config_path.write_text(json.dumps({"label_dict": {"FF-real": 0}}))
+    args = runner.build_parser().parse_args(["--base_config", str(config_path)])
+    with pytest.raises(ValueError, match="Original B0 RGB mean"):
+        runner._config(args)
+
+
+@pytest.mark.parametrize("native_champion,auto_pairing", [(False, False), (True, False), (False, True)])
+def test_all_numbered_families_use_real_tiny_clip_training_and_exports(tmp_path, monkeypatch, native_champion, auto_pairing):
     import copy
     import hashlib
     import numpy as np
@@ -209,7 +228,7 @@ def test_all_numbered_families_use_real_tiny_clip_training_and_exports(tmp_path,
         native[path] = {"path": str(high.relative_to(rgb_root)), "same_frame_verified": True,
                         "crop_verified": True, "native_verified": True, "evidence": "synthetic native fixture"}
         if fake:
-            mask_path = rgb_root / "mask" / path
+            mask_path = rgb_root / path.replace("/frames/", "/masks/") if "/frames/" in path else rgb_root / "mask" / path
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             mask = np.zeros((8, 8), dtype=np.uint8)
             mask[2:6, 2:6] = 255
@@ -226,7 +245,10 @@ def test_all_numbered_families_use_real_tiny_clip_training_and_exports(tmp_path,
             for offset in range(6):
                 target, source = f"{start + offset:03}", f"{start + (offset + 1) % 6:03}"
                 name = target if label == "FF-real" else f"{target}_{source}"
-                paths = [f"FaceForensics++/{label}/{name}/{index}.png" for index in (0, 3, 10, 20)]
+                branch = ("original_sequences/youtube" if label == "FF-real" else
+                          "manipulated_sequences/" + {"DF": "Deepfakes", "F2F": "Face2Face",
+                                                     "FS": "FaceSwap", "NT": "NeuralTextures"}[label[3:]])
+                paths = [f"FaceForensics++/{branch}/c23/frames/{name}/{index}.png" for index in (0, 3, 10, 20)]
                 for path in paths:
                     frame(path, label != "FF-real")
                 videos[name] = {"label": label, "frames": paths}
@@ -303,6 +325,15 @@ def test_all_numbered_families_use_real_tiny_clip_training_and_exports(tmp_path,
                        "--late_layers", "1", "--pixel_layers", "0", "1", "--last_layers", "1",
                        "--adapter_width", "4", "--rank", "2", "--native_resolution", "16",
                        "--bootstrap_repeats", "8", "--repeat_runs", "1"]
+    if auto_pairing:
+        for flag in ("--pair_audit", "--asset_audit"):
+            index = command.index(flag)
+            del command[index:index + 2]
+        audit_output = tmp_path / "image_audit"
+        assert runner.main(["--audit_images", "--base_config", str(config_path),
+                            "--rgb_root", str(rgb_root), "--output_dir", str(audit_output)]) == 0
+        audit = json.loads((audit_output / "audit/image_pair_audit.json").read_text())
+        assert audit["pairing_mode"] == "ffpp_original_frame_index"
     code = runner.main(command)
     assert code == 0
     folder, = output.iterdir()
@@ -316,7 +347,7 @@ def test_all_numbered_families_use_real_tiny_clip_training_and_exports(tmp_path,
     assert runner.legacy.state_sha256(original) == original_state
     for gid, row in result["arms"].items():
         if row["status"] != "OK":
-            assert row["status"] in {"NOT_APPLICABLE", "REUSED"}
+            assert row["status"] in {"NOT_APPLICABLE", "REUSED", "NOT_ELIGIBLE_ASSET"}
             continue
         artifact = torch.load(row["checkpoint"], weights_only=True)
         assert artifact["base_sha256"] == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
@@ -330,13 +361,32 @@ def test_all_numbered_families_use_real_tiny_clip_training_and_exports(tmp_path,
         assert all(selections[gid]["input_scope"] == "native" for gid in runner.ORDINARY_CONTROLS)
     assert runner.main(command + ["--resume", str(folder)]) == 0
     assert json.loads((folder / "all_results.json").read_text())["evaluation"]["reproduction"]["passed"]
-    if not native_champion:
+    if auto_pairing:
+        checked = json.loads((folder / "auto_image_pairs.json").read_text())
+        assert checked and all(not pair["time_verified"] and not pair["target_face_verified"] for pair in checked)
+        assert result["arms"]["G36_TAMPER_MASK"]["status"] == "OK"
+        assert result["arms"]["G36_NATIVE_448"]["status"] == "NOT_ELIGIBLE_ASSET"
+        changed = rgb_root / checked[0]["fake"]["all_frames"][0]
+        original_bytes = changed.read_bytes()
+        Image.new("RGB", (8, 8), (11, 22, 33)).save(changed)
+        assert runner.main(command + ["--resume", str(folder)]) == 1
+        changed.write_bytes(original_bytes)
+        # PNGs alone still supply the ordinary pair objective. Masks are optional.
+        for path in rgb_root.rglob("*.png"):
+            if "masks" in path.parts:
+                path.unlink()
+        args = runner.build_parser().parse_args(command)
+        prepared = runner.prepare_data(args, runner._config(args, runner.legacy.resolve_source(args)))
+        assert len(prepared["pairs"]) == len(checked)
+        assert not prepared["image_audit"]["asset_receipt"]["registered_masks"]
+    if not native_champion and not auto_pairing:
         partial_output = tmp_path / "no_pair_receipt"
         partial = command.copy()
         partial[partial.index("--output_dir") + 1] = str(partial_output)
         for flag in ("--pair_audit", "--asset_audit"):
             index = partial.index(flag)
             del partial[index:index + 2]
+        partial += ["--no_auto_pair_audit"]
         assert runner.main(partial + ["--arms", "G31", "G32_H_V", "G33", "--no_evaluation"]) == 0
         partial_folder, = partial_output.iterdir()
         partial_result = json.loads((partial_folder / "all_results.json").read_text())

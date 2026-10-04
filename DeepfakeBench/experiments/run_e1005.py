@@ -108,6 +108,7 @@ def build_parser():
     parser.add_argument("--pixel_layers", nargs="+", type=int, default=[8, 12])
     parser.add_argument("--native_resolution", type=int, default=448)
     parser.add_argument("--pair_audit", type=Path)
+    parser.add_argument("--no_auto_pair_audit", action="store_true", help="Disable default preprocessed-image pairing")
     parser.add_argument("--asset_audit", type=Path)
     parser.add_argument("--dataset_json_folder", type=Path)
     parser.add_argument("--rgb_root", type=Path)
@@ -121,6 +122,7 @@ def build_parser():
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--audit_metadata", action="store_true", help="No checkpoint/model needed; write pairing candidates")
+    parser.add_argument("--audit_images", action="store_true", help="Audit preprocessed PNG/optional landmarks/masks without a model")
     return parser
 
 
@@ -144,11 +146,12 @@ def _config(args, source=None):
     if args.clip_pretrained_path:
         config["clip_pretrained_path"] = args.clip_pretrained_path
     config["multi_crop"] = False
-    for name in ("mean", "std"):
-        if name not in config or len(config[name]) != 3 or not all(math.isfinite(float(x)) for x in config[name]):
-            raise ValueError(f"Original B0 RGB {name} must contain three finite entries")
-    if any(value <= 0 for value in config["std"]):
-        raise ValueError("RGB std must be positive")
+    if not (args.audit_metadata or args.audit_images):
+        for name in ("mean", "std"):
+            if name not in config or len(config[name]) != 3 or not all(math.isfinite(float(x)) for x in config[name]):
+                raise ValueError(f"Original B0 RGB {name} must contain three finite entries")
+        if any(value <= 0 for value in config["std"]):
+            raise ValueError("RGB std must be positive")
     return config
 
 
@@ -166,7 +169,7 @@ def prepare_data(args, config):
     unavailable = []
     for dataset in ["Celeb-DF-v2", *protocol.REGRESSION_DATASETS]:
         path = folder / f"{dataset}.json"
-        if args.audit_metadata and not path.is_file():
+        if (args.audit_metadata or args.audit_images) and not path.is_file():
             unavailable.append(dataset)
             continue
         print(f"E1005 metadata: {dataset} selected test split", file=sys.stderr, flush=True)
@@ -176,11 +179,38 @@ def prepare_data(args, config):
     legacy_val = data_api.build_manifest(ff_path, "FaceForensics++", "val", labels, compression,
                                         sampling="legacy_prefix8", frames=args.eval_frames)
     candidates = data_api.build_pair_candidates(train)
-    pairs = data_api.verified_pairs(candidates, args.pair_audit) if args.pair_audit else []
+    image_audit = None
+    if not args.audit_metadata and not args.no_auto_pair_audit:
+        from e1005_image_audit import audit_preprocessed_pairs
+        def audit_progress(value):
+            print("E1005 image audit: " + json.dumps(value, ensure_ascii=False), file=sys.stderr, flush=True)
+        image_audit = audit_preprocessed_pairs(candidates, config["rgb_root_override"],
+                                               ROOT / "preprocessing/preprocess.py", progress=audit_progress)
+    pairs = (data_api.verified_pairs(candidates, args.pair_audit) if args.pair_audit else
+             image_audit["pairs"] if image_audit else [])
+    pairing_mode = ("manual_time_face" if args.pair_audit else
+                    "ffpp_original_frame_index" if image_audit else "disabled")
+    episode_ready, episode_reason = False, "no checked FF++ pairs available"
+    if pairs:
+        try:
+            data_api.build_episodes(pairs, 1, args.seed)
+            episode_ready, episode_reason = True, "four-method distinct-target episodes available"
+        except ValueError as exc:
+            episode_reason = str(exc)
     return {"train": train, "manifests": manifests, "legacy_val": legacy_val,
             "metadata_sha256": metadata_hashes, "candidates": candidates, "pairs": pairs,
             "pair_audit_sha256": legacy.file_sha256(args.pair_audit) if args.pair_audit else None,
+            "image_audit": image_audit, "image_audit_sha256": json_hash(image_audit["report"]) if image_audit else None,
+            "pairing_mode": pairing_mode, "pair_episode_ready": episode_ready, "pair_episode_reason": episode_reason,
             "unavailable_metadata": unavailable}
+
+
+def save_image_audit(folder, prepared):
+    if prepared.get("image_audit"):
+        audit = prepared["image_audit"]
+        write_json(Path(folder) / "image_pair_audit.json", audit["report"])
+        write_json(Path(folder) / "auto_image_pairs.json", audit["pairs"])
+        write_json(Path(folder) / "auto_asset_receipt.json", audit["asset_receipt"])
 
 
 def training_settings(args, config, options, budget):
@@ -454,13 +484,15 @@ def _source_budget(args, source):
 
 
 def _run_identity(args, source, prepared, reader, options, budget_info, asset_receipt):
-    files = [ROOT / "experiments" / name for name in ("run_e1005.py", "e1005_protocol.py", "e1005_data.py",
+    files = [ROOT / "experiments" / name for name in ("run_e1005.py", "e1005_protocol.py", "e1005_data.py", "e1005_image_audit.py",
                   "e1005_assets.py", "e1005_reporting.py", "run_e1001.py", "run_e1002.py")]
     files += [ROOT / "training/detectors" / name for name in ("e1005_models.py", "e1005_objectives.py", "e1002_matrix.py")]
     files += [ROOT / "training/dataset" / name for name in ("abstract_dataset.py", "balance_batch_sampler.py")]
     files.append(ROOT / "training/detectors/effort_detector.py")
+    files.append(ROOT / "preprocessing/preprocess.py")
     return {"base_sha256": source["base_sha256"], "config_sha256": source["config_sha256"],
             "metadata_sha256": prepared["metadata_sha256"], "pair_audit_sha256": prepared["pair_audit_sha256"],
+            "image_audit_sha256": prepared["image_audit_sha256"], "pairing_mode": prepared["pairing_mode"],
             "asset_audit_hash": json_hash(asset_receipt) if asset_receipt else None,
             "reader": reader.settings, "options": options, "seed": args.seed,
             "warm_steps": args.steps, "cold_steps": args.cold_steps, "budget_provenance": budget_info,
@@ -514,8 +546,8 @@ def checked_asset_audit(root, asset_status, resume):
 
 
 def _eligible(spec, prepared, asset_status, leader, inherited_steps):
-    if spec["requires_pairs"] and not prepared["pairs"]:
-        return "NOT_ELIGIBLE_PAIR_AUDIT", "verified time/target-face pair audit receipt missing"
+    if spec["requires_pairs"] and not prepared.get("pair_episode_ready", bool(prepared["pairs"])):
+        return "NOT_ELIGIBLE_PAIR_AUDIT", prepared.get("pair_episode_reason", "checked FF++ image pairs unavailable")
     if spec["depends_on_leader"] and leader is None:
         return "NOT_ELIGIBLE_PREREQUISITE", "no successful G32 development leader"
     if spec["requires_mask"] and not asset_status["mask"]["eligible"]:
@@ -542,7 +574,8 @@ def run(args, source, config, prepared):
     reader = data_api.make_reader(config["rgb_root_override"], config["resolution"], args.reader_backend)
     inherited_steps, budget_info = _source_budget(args, source)
     cold_budget = args.cold_steps if args.cold_steps is not None else args.steps + (inherited_steps or 0)
-    asset_receipt = json.loads(args.asset_audit.read_text()) if args.asset_audit else None
+    asset_receipt = (json.loads(args.asset_audit.read_text()) if args.asset_audit else
+                     deepcopy(prepared["image_audit"]["asset_receipt"]) if prepared["image_audit"] else None)
     options = {"rank": args.rank, "last_layers": args.last_layers, "adapter_width": args.adapter_width,
                "local_layers": args.local_layers, "late_layers": args.late_layers, "pixel_layers": args.pixel_layers,
                "aux_image_size": args.native_resolution, "shuffle_seed": args.seed,
@@ -597,12 +630,18 @@ def run(args, source, config, prepared):
     write_json(root / "runtime_config.json", config)
     write_json(root / "pair_candidates.json", prepared["candidates"])
     write_json(root / "verified_pairs.json", prepared["pairs"])
+    save_image_audit(root, prepared)
     write_json(root / "input_manifests.json", prepared["manifests"])
     write_json(root / "experiment_catalog.json", protocol.plan(seed=args.seed, steps=args.steps))
     initial_hash = legacy.state_sha256(base)
     manifest["base_state_sha256_before"] = initial_hash
     write_json(root / "manifest.json", manifest)
     results = load_or_initialize_results(root, args.resume)
+    results["pairing_mode"] = prepared["pairing_mode"]
+    results["pairing_note"] = ("Same target and original frame index under the FF++/preprocessing contract; "
+                               "no independent timestamp, face identity, or pixel alignment verification."
+                               if prepared["pairing_mode"] == "ffpp_original_frame_index" else
+                               "Explicit manual receipt" if prepared["pairing_mode"] == "manual_time_face" else "Pairing disabled")
     references = {"standard": {}, "native": {}}
     try:
         if asset_receipt and prepared["pairs"]:
@@ -822,6 +861,7 @@ def evaluate_final(args, root, results, lock, base, pristine, prepared, reader, 
                        manifest, root, args.resume)
             final_cache[scope][dataset] = values
     evaluation = {"champion": champion, "reports": {}, "export_ids": sorted(chosen),
+                  "pairing_mode": results["pairing_mode"], "pairing_note": results["pairing_note"],
                   "panel": "historically examined six-domain regression, not fresh confirmation"}
     exports = {}
     for position, gid in enumerate(sorted(chosen), 1):
@@ -914,6 +954,10 @@ def evaluate_final(args, root, results, lock, base, pristine, prepared, reader, 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.audit_metadata and args.audit_images:
+        parser.error("Choose --audit_metadata or --audit_images")
+    if args.audit_images and args.no_auto_pair_audit:
+        parser.error("--audit_images requires automatic image audit")
     values = (args.steps, args.train_frames, args.eval_frames, args.eval_videos, args.eval_every, args.log_every,
               args.rank, args.last_layers, args.adapter_width, args.native_resolution, args.bootstrap_repeats)
     if min(values) < 1 or args.repeat_runs < 0 or (args.cold_steps is not None and args.cold_steps < 1):
@@ -942,15 +986,17 @@ def main(argv=None):
         args.base_checkpoint = Path(saved["source"]["checkpoint"])
         args.base_config = Path(saved["source"]["config_path"])
     try:
-        source = None if args.audit_metadata else legacy.resolve_source(args)
+        audit_only = args.audit_metadata or args.audit_images
+        source = (None if audit_only and not args.base_run and not args.base_checkpoint else legacy.resolve_source(args))
         config = _config(args, source)
         prepared = prepare_data(args, config)
     except (ValueError, OSError, KeyError) as exc:
         parser.error(str(exc))
-    if args.audit_metadata or args.preflight:
+    if args.audit_metadata or args.audit_images or args.preflight:
         folder = args.output_dir / "audit"
         write_json(folder / "input_manifests.json", prepared["manifests"])
         write_json(folder / "pair_candidates.json", prepared["candidates"])
+        save_image_audit(folder, prepared)
         template = {"schema_version": 1, "receipt_id": "REQUIRES_TIME_AND_TARGET_FACE_VERIFICATION", "pairs": [
             {"pair_id": row["pair_id"], "real_video_id": row["real"]["video_id"],
              "fake_video_id": row["fake"]["video_id"], "target_id": row["fake"]["target_id"],
@@ -958,12 +1004,21 @@ def main(argv=None):
              "time_verified": False, "target_face_verified": False, "evidence": ""}
             for row in prepared["candidates"]["pairs"]]}
         write_json(folder / "pair_audit_template.json", template)
-        print(json.dumps({"experiment": "E1005", "status": "PAIR_CANDIDATES_ONLY" if prepared["unavailable_metadata"] else "METADATA_OK", "audit_dir": str(folder),
+        audit_status = (("MANUAL_PAIRS_READY" if args.pair_audit else "IMAGE_INDEX_PAIRED")
+                        if prepared["pair_episode_ready"] else "IMAGE_PAIRING_UNAVAILABLE"
+                        if prepared["image_audit"] else "PAIR_CANDIDATES_ONLY"
+                        if prepared["unavailable_metadata"] else "METADATA_OK")
+        print(json.dumps({"experiment": "E1005", "status": audit_status, "audit_dir": str(folder),
              "verified_pairs": len(prepared["pairs"]), "candidate_coverage": prepared["candidates"]["coverage"],
+             "checked_pairs": len(prepared["pairs"]),
+             "manual_time_face_verified_pairs": len(prepared["pairs"]) if args.pair_audit else 0,
+             "pairing_mode": prepared["pairing_mode"], "pair_episode_ready": prepared["pair_episode_ready"],
+             "pair_episode_reason": prepared["pair_episode_reason"],
              "unavailable_external_metadata": prepared["unavailable_metadata"],
              "base_sha256": source["base_sha256"] if source else None,
-             "note": "Candidates are not verified alignment; model/images/CUDA not validated here."}, indent=2))
-        return 0
+             "note": "No model/CUDA check. Automatic pairs validate image integrity and original frame indices, "
+                     "not independent timestamp/face/pixel alignment."}, indent=2))
+        return 1 if args.audit_images and not prepared["pair_episode_ready"] else 0
     try:
         return run(args, source, config, prepared)
     except (ValueError, OSError, RuntimeError, KeyError) as exc:

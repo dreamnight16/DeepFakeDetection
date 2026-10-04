@@ -148,7 +148,8 @@ def plan(arms=None, seed=1024, steps=5750):
             "selection": "S3=Celeb-DF-v2 development video_auc; no historical-six-domain selection",
             "selectors": ["S1_source_frame", "S2_source_video", "S3_development_video", "S4_final_step"],
             "primary_sampling": "numeric sorted uniform_metadata8", "historical_sampling": "legacy_prefix8",
-            "pair_gate": "explicit time/target-face audit receipt; candidates are not verified pairs",
+            "pair_gate": "default decoded preprocessed images paired by FF++ target and original frame index; optional manual time/face receipt",
+            "pairing_alignment": "image-index pairing does not independently verify timestamps, face identity, or pixel alignment",
             "regression_datasets": REGRESSION_DATASETS,
             "reproduction": "same seed/config/manifests; no multi-seed scan",
             "stages": ["audit", "screen", "ablate", "represent", "conditional", "evaluate", "reproduce"]}
