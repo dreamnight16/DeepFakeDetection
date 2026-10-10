@@ -338,7 +338,7 @@ def seed_everything(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def preflight(args, source):
+def preflight(args, source, *, validate_train_sampling=True):
     import yaml
     from e0924_protocol import calibration_partition
     from run_g25 import TEST_DS
@@ -362,7 +362,8 @@ def preflight(args, source):
         config["clip_pretrained_path"] = args.clip_pretrained_path
     if args.batch_size:
         config["train_batchSize"] = args.batch_size
-    validate_sampling(config["train_batchSize"], args.sampler_real_ratio)
+    if validate_train_sampling:
+        validate_sampling(config["train_batchSize"], args.sampler_real_ratio)
     hashes = {}
     for dataset in TEST_DS:
         path = Path(config["dataset_json_folder"]) / f"{dataset}.json"
