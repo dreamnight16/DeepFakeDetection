@@ -1,6 +1,7 @@
 """E1010: auxiliary-only forgery likelihood and asymmetric token supervision."""
 
 import argparse
+import copy
 import datetime
 import importlib.util
 import json
@@ -32,7 +33,6 @@ ARMS.update({f"G4_{method}": {"family": "prototype", "method": method}
              for method in ("ALL", "RANDOM", "TOPK")})
 
 # Public E1001 helpers preserve the source checkpoint and strict input protocol.
-resolve_source = frozen.resolve_source
 preflight = frozen.preflight
 make_train_loader = frozen.make_train_loader
 verify_paired_base = frozen.verify_paired_base
@@ -46,9 +46,14 @@ close_loader = frozen.close_loader
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base_run", type=Path, help="Existing E0924 run with its original G26_B0")
+    parser.add_argument("--base_run", type=Path, help="Existing E0924 or E1010 run with a successful trained B0")
     parser.add_argument("--base_checkpoint", type=Path)
     parser.add_argument("--base_config", type=Path)
+    parser.add_argument("--baseline_only", action="store_true", help="Train/reuse and evaluate B0, then stop")
+    parser.add_argument("--base_n_epochs", type=int, default=10,
+                        help="Historical B0 nEpochs (10 means epoch 0-10, eleven passes)")
+    parser.add_argument("--base_sampler_real_ratio", type=float, default=.3)
+    parser.add_argument("--base_batch_size", type=int, help="B0 training batch override; default historical config")
     parser.add_argument("--output_dir", type=Path, default=ROOT / "experiment_results/E1010")
     parser.add_argument("--arms", nargs="+", choices=list(ARMS), default=list(ARMS))
     parser.add_argument("--n_epochs", type=int, default=10)
@@ -123,10 +128,20 @@ def arm_settings(args, arm):
 def plan(args):
     mil_aliases = {f"G2_A{code}_{objective}": f"G2_M{code}_{objective}"
                    for code in MASKS for objective in ("MIL", "UNIFORM_MIL", "FL_MIL")}
+    fresh = not (args.base_run or args.base_checkpoint or args.base_config)
+    arms = [] if args.baseline_only else args.arms
     return {"experiment": "E1010", "groups": {"G0": "B0", "G1": "lfeq", "G2": "aux", "G3": "decoder", "G4": "prototype"},
-            "base_training": False, "default_arms": list(ARMS),
-            "arms": {arm: arm_settings(args, arm) for arm in args.arms}, "decisions": [],
-            "base": "reuse original B0; freeze ViT/LoRA/CLS/head; auxiliary gradients never reach B0",
+            "base_training": fresh, "default_arms": list(ARMS),
+            "arms": {arm: arm_settings(args, arm) for arm in arms}, "decisions": [],
+            "base": "train a fresh original B0 when no source is supplied, otherwise reuse; freeze before all auxiliary stages",
+            "baseline": {"protocol": "E0924/G26_B0", "mode": "train" if fresh else "reuse",
+                         "baseline_only": args.baseline_only, "nEpochs": args.base_n_epochs,
+                         "training_passes": args.base_n_epochs + 1,
+                         "sampler_real_ratio": args.base_sampler_real_ratio,
+                         "train_batch_override": args.base_batch_size,
+                         "selection": "CDF-v2 frame AUC",
+                         "augmentation": "original B0 training augmentation; disabled only after training",
+                         "reproduction": "historical basename metrics and separate strict full-path G0 metrics"},
             "G1_source": "G18 LFEQ queries and original readout on final B0 patches",
             "G2_source": "G25 four attention masks and max/all supervision in an independent frozen B0 suffix",
             "G3_source": "G30 independent evidence decoder reading block-input patches",
@@ -155,6 +170,44 @@ def validate_sampling(batch_size, ratio, require_two_fake=False):
     real = max(1, round(effective * ratio))
     if require_two_fake and effective - real < 2:
         raise ValueError("Local contrastive learning requires at least two fake images and one real per batch")
+
+
+def resolve_source(args):
+    if args.base_run and (args.base_run / "G0/training/result.json").is_file():
+        if args.base_checkpoint or args.base_config:
+            raise ValueError("Use --base_run OR both --base_checkpoint and --base_config")
+        folder = args.base_run / "G0/training"
+        result = json.loads((folder / "result.json").read_text())
+        if result.get("status") != "OK" or not result.get("ckpt"):
+            raise ValueError("The E1010 source B0 must have successful training and evaluation")
+        direct = copy.copy(args)
+        direct.base_run = None
+        direct.base_checkpoint = Path(result["ckpt"])
+        direct.base_config = folder / "train_config.json"
+        return frozen.resolve_source(direct)
+    return frozen.resolve_source(args)
+
+
+def planned_baseline_config(args):
+    """Read input metadata settings for preflight, without creating an ML model.
+
+    This preview is never used for training. The runtime uses the historical
+    G26 builder so its augmentation, optimizer and model settings are preserved.
+    """
+    import yaml
+
+    config = yaml.safe_load((ROOT / "training/config/detector/effort.yaml").read_text())
+    config.update(yaml.safe_load((ROOT / "training/config/train_config.yaml").read_text()))
+    local_metadata = ROOT / "preprocessing/dataset_json"
+    if args.dataset_json_folder:
+        config["dataset_json_folder"] = str(args.dataset_json_folder.resolve())
+    elif local_metadata.is_dir():
+        config["dataset_json_folder"] = str(local_metadata)
+    if args.base_batch_size is not None:
+        config["train_batchSize"] = args.base_batch_size
+    config.update(model_name="effort", use_mixup=False, multi_crop=False,
+                  use_texture_crop=False, use_freq_split=False)
+    return config
 
 
 def core_module():
@@ -335,8 +388,13 @@ def train_auxiliary(model, loader, validation_loader, reference, args, checkpoin
 
 
 def _validate_arguments(parser, args):
-    auxiliary_arms = [arm for arm in args.arms if ARMS[arm]["family"] != "prototype"]
-    prototype_arms = [arm for arm in args.arms if ARMS[arm]["family"] == "prototype"]
+    arms = [] if args.baseline_only else args.arms
+    auxiliary_arms = [arm for arm in arms if ARMS[arm]["family"] != "prototype"]
+    prototype_arms = [arm for arm in arms if ARMS[arm]["family"] == "prototype"]
+    if not (args.base_run or args.base_checkpoint or args.base_config):
+        if (args.base_n_epochs < 0 or not 0 < args.base_sampler_real_ratio < 1
+                or (args.base_batch_size is not None and args.base_batch_size < 2)):
+            parser.error("Require base_n_epochs>=0, a valid B0 sampling ratio and base_batch_size>=2")
     if len(args.arms) != len(set(args.arms)):
         parser.error("Do not repeat arms within a run")
     if args.seed < 0 or not 0 < args.gate_width <= .5 or not 0 <= args.aux_max_weight <= .5:
@@ -376,17 +434,28 @@ def main(argv=None):
     if args.dry_run:
         print(json.dumps(plan(args), indent=2))
         return 0
+    fresh_baseline = not (args.base_run or args.base_checkpoint or args.base_config)
+    active_arms = [] if args.baseline_only else args.arms
     try:
-        source = resolve_source(args)
-        has_auxiliary = any(ARMS[arm]["family"] != "prototype" for arm in args.arms)
-        config, partition, metadata_hashes = preflight(args, source, validate_train_sampling=has_auxiliary)
+        has_auxiliary = any(ARMS[arm]["family"] != "prototype" for arm in active_arms)
+        if fresh_baseline:
+            source = {"kind": "fresh_pretrained_planned", "config": planned_baseline_config(args)}
+            preview_args = copy.copy(args)
+            preview_args.batch_size = None
+            preview_args.sampler_real_ratio = args.base_sampler_real_ratio
+            config, partition, metadata_hashes = preflight(preview_args, source, validate_train_sampling=True)
+        else:
+            source = resolve_source(args)
+            config, partition, metadata_hashes = preflight(args, source, validate_train_sampling=has_auxiliary)
         if has_auxiliary:
-            validate_sampling(config["train_batchSize"], args.sampler_real_ratio,
-                              any(ARMS[arm].get("likelihood", "off") != "off" for arm in args.arms))
+            auxiliary_batch = args.batch_size if args.batch_size is not None else config["train_batchSize"]
+            validate_sampling(auxiliary_batch, args.sampler_real_ratio,
+                              any(ARMS[arm].get("likelihood", "off") != "off" for arm in active_arms))
     except (ValueError, OSError, KeyError) as exc:
         parser.error(str(exc))
     if args.preflight:
-        print(json.dumps({"status": "OK", "base_sha256": source["base_sha256"],
+        print(json.dumps({"status": "OK", "base_sha256": source.get("base_sha256"),
+                          "base_training": fresh_baseline,
                           "dataset_sha256": metadata_hashes,
                           "note": "source/metadata only; images, checkpoint loading, and ML runtime not checked"}, indent=2))
         return 0
@@ -407,7 +476,8 @@ def main(argv=None):
     hashes = source_hashes()
     for path in ("experiments/run_e1010.py", "experiments/run_e1001.py", "training/detectors/e1010_tokens.py",
                  "experiments/run_g18_lfeq.py", "training/detectors/effort_detector_lfeq.py",
-                 "training/detectors/lfeq_module.py", "experiments/e1010_prototypes.py"):
+                 "training/detectors/lfeq_module.py", "experiments/e1010_prototypes.py",
+                 "experiments/e1010_baseline.py"):
         hashes[path] = file_sha256(ROOT / path)
     if (ROOT / "experiments/E1010_README.md").is_file():
         hashes["experiments/E1010_README.md"] = file_sha256(ROOT / "experiments/E1010_README.md")
@@ -417,13 +487,48 @@ def main(argv=None):
                 "python": sys.version, "torch": torch.__version__, "transformers": transformers.__version__,
                 "budget": {"epochs": args.n_epochs, "aux_lr": args.aux_lr, "weight_decay": args.weight_decay,
                            "sampler_real_ratio": args.sampler_real_ratio, "train_batch_size": config["train_batchSize"]},
-                "scope": "auxiliary parameters only; B0 ViT/LoRA/CLS/head frozen"}
+                "scope": "original B0 training/reuse phase, then frozen ViT/LoRA/CLS/head for all auxiliary stages"}
     results = {"experiment": "E1010", "G0": {"status": "NOT_RUN"},
-               "arms": {arm: {"status": "NOT_RUN", "settings": arm_settings(args, arm)} for arm in args.arms}}
+               "arms": {arm: {"status": "NOT_RUN", "settings": arm_settings(args, arm)} for arm in active_arms}}
     write_json(root / "manifest.json", manifest)
     write_json(root / "all_results.json", results)
     write_json(root / "runtime_config.json", config)
     write_json(root / "calibration_partition.json", partition)
+    baseline_training = None
+    if fresh_baseline:
+        from e1010_baseline import prepare_baseline
+
+        try:
+            print("E1010/G0: train fresh B0 using E0924/G26_B0 protocol", flush=True)
+            baseline_training = prepare_baseline(args, root / "G0/training", utilities)
+            manifest["baseline_training"] = baseline_training
+            if baseline_training["status"] != "OK":
+                manifest.update(status="BASE_TRAIN_FAILED" if baseline_training["status"] == "TRAIN_FAILED" else "BASE_EVAL_FAILED")
+                results["G0"] = {"status": "FAILED", "baseline_training": baseline_training}
+                write_json(root / "G0/result.json", results["G0"])
+                write_json(root / "manifest.json", manifest)
+                write_json(root / "all_results.json", results)
+                return 1
+            direct = copy.copy(args)
+            direct.base_run = None
+            direct.base_checkpoint = Path(baseline_training["ckpt"])
+            direct.base_config = Path(baseline_training["config_path"])
+            source = frozen.resolve_source(direct)
+            config, partition, metadata_hashes = preflight(args, source, validate_train_sampling=has_auxiliary)
+            if has_auxiliary:
+                validate_sampling(config["train_batchSize"], args.sampler_real_ratio,
+                                  any(ARMS[arm].get("likelihood", "off") != "off" for arm in active_arms))
+            manifest.update(source=source, dataset_sha256=metadata_hashes)
+            manifest["budget"]["train_batch_size"] = config["train_batchSize"]
+            write_json(root / "runtime_config.json", config)
+            write_json(root / "calibration_partition.json", partition)
+            write_json(root / "manifest.json", manifest)
+        except Exception as exc:
+            manifest.update(status="BASE_PREPARATION_FAILED", error=f"{type(exc).__name__}: {exc}")
+            results["G0"] = {"status": "FAILED", "baseline_training": baseline_training, "error": manifest["error"]}
+            write_json(root / "manifest.json", manifest)
+            write_json(root / "all_results.json", results)
+            return 1
     try:
         base = utilities.load_model(config, source["checkpoint"])
     except Exception as exc:
@@ -452,7 +557,7 @@ def main(argv=None):
         validation_loader = loader(VAL_DS)
         references, baseline_metrics = {}, {}
         baseline_folder = root / "G0"
-        baseline_folder.mkdir()
+        baseline_folder.mkdir(exist_ok=True)
         for dataset in TEST_DS:
             frames = validation_loader if dataset == VAL_DS else loader(dataset)
             try:
@@ -465,12 +570,14 @@ def main(argv=None):
             baseline_metrics[dataset] = readout_metrics(values, values["cls_prob"])
         results["G0"] = {"status": "OK", "reused_checkpoint": source["checkpoint"], "datasets": baseline_metrics,
                          "independent_mean": independent_mean({ds: {"B0": value} for ds, value in baseline_metrics.items()}, "B0")}
+        if baseline_training is not None:
+            results["G0"]["baseline_training"] = baseline_training
         write_json(baseline_folder / "result.json", results["G0"])
         write_json(root / "all_results.json", results)
         prototype_data = None
         prototype_setup_error = None
-        prototype_methods = [ARMS[arm]["method"] for arm in args.arms if ARMS[arm]["family"] == "prototype"]
-        for arm in args.arms:
+        prototype_methods = [ARMS[arm]["method"] for arm in active_arms if ARMS[arm]["family"] == "prototype"]
+        for arm in active_arms:
             folder = root / arm
             folder.mkdir()
             seed_everything(args.seed)

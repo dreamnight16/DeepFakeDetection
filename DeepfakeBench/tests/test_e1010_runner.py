@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from test_e1010_baseline import config_builder
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "experiments/run_e1010.py"
@@ -37,7 +39,9 @@ def test_dry_run_lists_all_three_families_without_ml_dependencies(tmp_path):
                              capture_output=True, text=True, check=False)
     assert process.returncode == 0, process.stderr
     protocol = json.loads(process.stdout)
-    assert protocol["experiment"] == "E1010" and protocol["base_training"] is False
+    assert protocol["experiment"] == "E1010" and protocol["base_training"] is True
+    assert protocol["baseline"]["nEpochs"] == 10
+    assert protocol["baseline"]["training_passes"] == 11
     assert list(protocol["arms"]) == ARM_NAMES
     assert len(protocol["arms"]) == 75
     assert protocol["groups"] == {"G0": "B0", "G1": "lfeq", "G2": "aux", "G3": "decoder", "G4": "prototype"}
@@ -372,3 +376,151 @@ def test_g4_end_to_end_shared_train_pool_reloads_and_preserves_b0(runner, tiny_s
 def test_invalid_g4_configuration_fails_before_loading(runner, flag, value):
     with pytest.raises(SystemExit):
         runner.main(["--dry_run", "--arms", "G4_ALL", flag, value])
+
+
+def test_baseline_only_plan_has_no_auxiliary_groups_and_no_ml(tmp_path):
+    process = subprocess.run([sys.executable, "-S", str(SCRIPT), "--dry_run", "--baseline_only"],
+                             capture_output=True, text=True)
+    assert process.returncode == 0, process.stderr
+    plan = json.loads(process.stdout)
+    assert plan["base_training"] is True and plan["arms"] == {}
+    assert plan["baseline"]["protocol"] == "E0924/G26_B0"
+
+
+@pytest.fixture
+def fresh_training(tiny_source, runner, config_builder, monkeypatch):
+    import torch
+    from test_g30 import TinyB0
+
+    _, config_path = tiny_source
+    source_config = json.loads(config_path.read_text())
+    utilities = sys.modules["experiment_utils"]
+    utilities.build_config = config_builder
+    calls = []
+
+    def train(config, train_dataset, validation_dataset):
+        calls.append(dict(config))
+        assert config["use_data_augmentation"] is True
+        assert config["use_mixup"] is False and config["full_train_head"] is True
+        assert config["sampler_real_ratio"] == .3 and config["nEpochs"] == 0
+        model = TinyB0("eager")
+        optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad), lr=2e-4)
+        logits = model({"image": torch.randn(4, 3, 8, 8)})["cls"]
+        torch.nn.functional.cross_entropy(logits, torch.tensor([0, 1, 0, 1])).backward()
+        optimizer.step()
+        checkpoint = Path(config["log_dir"]) / "tiny_trained_b0.pth"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), checkpoint)
+        return str(checkpoint)
+
+    def evaluate(config, checkpoint, datasets, train_dataset, folder, exp_name):
+        assert config["e0924_protocol"] is True
+        return {"testall": {ds: {"video_auc": .8, "auc": .79} for ds in runner.TEST_DS}}
+
+    utilities.train_model = train
+    utilities.evaluate_model = evaluate
+    return Path(source_config["dataset_json_folder"]), utilities, calls
+
+
+def test_fresh_baseline_only_trains_then_exports_both_metric_protocols(runner, fresh_training, tmp_path):
+    metadata, _, calls = fresh_training
+    output = tmp_path / "fresh"
+    assert runner.main(["--baseline_only", "--dataset_json_folder", str(metadata),
+                        "--base_n_epochs", "0", "--base_batch_size", "4",
+                        "--n_epochs", "0", "--sampler_real_ratio", "1", "--output_dir", str(output)]) == 0
+    root, = output.iterdir()
+    assert len(calls) == 1
+    training = json.loads((root / "G0/training/train_config.json").read_text())
+    runtime = json.loads((root / "runtime_config.json").read_text())
+    assert training["use_data_augmentation"] is True and runtime["use_data_augmentation"] is False
+    report = json.loads((root / "G0/training/reproduction.json").read_text())
+    assert report["video_auc_seven_mean"] == pytest.approx(.8)
+    assert report["reproduction_status"] == "REFERENCE_NOT_PROVIDED"
+    assert report["epoch_loop"]["training_passes"] == 1
+    result = json.loads((root / "all_results.json").read_text())
+    assert result["arms"] == {} and result["G0"]["status"] == "OK"
+    assert result["G0"]["baseline_training"]["status"] == "OK"
+    assert "video_auc_fullpath" in result["G0"]["datasets"]["DFDC"]
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["protocol"]["base_training"] is True
+    assert manifest["base_state_unchanged"] and manifest["base_file_unchanged"]
+    assert "experiments/e1010_baseline.py" in manifest["source_sha256"]
+
+
+def test_e1010_trained_baseline_run_is_reusable_without_retraining(runner, fresh_training, tmp_path, monkeypatch):
+    metadata, utilities, calls = fresh_training
+    output = tmp_path / "first"
+    assert runner.main(["--baseline_only", "--dataset_json_folder", str(metadata),
+                        "--base_n_epochs", "0", "--base_batch_size", "4", "--output_dir", str(output)]) == 0
+    root, = output.iterdir()
+    monkeypatch.setattr(utilities, "train_model", lambda *a: pytest.fail("Existing B0 must be reused"))
+    second = tmp_path / "second"
+    assert runner.main(["--base_run", str(root), "--output_dir", str(second), "--arms", "G3_FL_MIL",
+                        "--num_tokens", "2", "--memory_layer", "1", "--hidden_dim", "8",
+                        "--num_heads", "4", "--depth", "1", "--n_epochs", "1"]) == 0
+    second_root, = second.iterdir()
+    report = json.loads((second_root / "all_results.json").read_text())
+    assert report["arms"]["G3_FL_MIL"]["status"] == "OK"
+    assert len(calls) == 1
+    assert json.loads((second_root / "manifest.json").read_text())["protocol"]["base_training"] is False
+
+
+def test_fresh_baseline_failure_stops_before_auxiliary_models(runner, fresh_training, tmp_path, monkeypatch):
+    metadata, utilities, _ = fresh_training
+    monkeypatch.setattr(utilities, "train_model", lambda *a: None)
+    monkeypatch.setattr(runner, "make_train_loader", lambda *a: pytest.fail("B0 failure must stop auxiliary training"))
+    output = tmp_path / "failed"
+    assert runner.main(["--dataset_json_folder", str(metadata), "--base_n_epochs", "0",
+                        "--base_batch_size", "4", "--arms", "G3_PLAIN", "--output_dir", str(output)]) == 1
+    root, = output.iterdir()
+    result = json.loads((root / "all_results.json").read_text())
+    assert result["G0"]["status"] == "FAILED"
+    assert result["arms"]["G3_PLAIN"]["status"] == "NOT_RUN"
+    assert json.loads((root / "manifest.json").read_text())["status"] == "BASE_TRAIN_FAILED"
+
+
+def test_fresh_preflight_checks_metadata_without_training(runner, fresh_training, monkeypatch):
+    metadata, utilities, _ = fresh_training
+    monkeypatch.setattr(utilities, "train_model", lambda *a: pytest.fail("Preflight cannot train"))
+    assert runner.main(["--preflight", "--baseline_only", "--dataset_json_folder", str(metadata)]) == 0
+
+
+def test_fresh_preflight_rejects_invalid_auxiliary_batch_before_training(runner, fresh_training, monkeypatch):
+    metadata, utilities, _ = fresh_training
+    monkeypatch.setattr(utilities, "train_model", lambda *a: pytest.fail("Invalid auxiliary setup must fail before B0"))
+    with pytest.raises(SystemExit):
+        runner.main(["--preflight", "--dataset_json_folder", str(metadata),
+                     "--arms", "G3_FL_MIL", "--batch_size", "3"])
+
+
+@pytest.mark.parametrize("arm", ["G3_PLAIN", "G4_TOPK"])
+def test_fresh_baseline_and_following_group_run_in_one_invocation(runner, fresh_training, tmp_path, arm):
+    metadata, _, calls = fresh_training
+    output = tmp_path / "all_stages"
+    assert runner.main(["--dataset_json_folder", str(metadata), "--base_n_epochs", "0",
+                        "--base_batch_size", "4", "--output_dir", str(output), "--arms", arm,
+                        "--n_epochs", "1", "--num_tokens", "2", "--memory_layer", "1",
+                        "--hidden_dim", "8", "--num_heads", "4", "--depth", "1",
+                        "--prototype_top_k", "2", "--prototype_pool_top_k", "2",
+                        "--prototype_frames_per_class", "1"]) == 0
+    root, = output.iterdir()
+    results = json.loads((root / "all_results.json").read_text())
+    assert results["G0"]["baseline_training"]["status"] == "OK"
+    assert results["arms"][arm]["status"] == "OK"
+    assert results["arms"][arm]["base_scores_bitwise_identical"]
+    assert len(calls) == 1
+
+
+def test_fresh_baseline_evaluation_failure_stops_following_groups(runner, fresh_training, tmp_path, monkeypatch):
+    metadata, utilities, _ = fresh_training
+
+    def fail(*args):
+        raise RuntimeError("historical evaluation failed")
+
+    monkeypatch.setattr(utilities, "evaluate_model", fail)
+    output = tmp_path / "evaluation_failure"
+    assert runner.main(["--dataset_json_folder", str(metadata), "--base_n_epochs", "0",
+                        "--base_batch_size", "4", "--output_dir", str(output), "--arms", "G3_PLAIN"]) == 1
+    root, = output.iterdir()
+    assert json.loads((root / "manifest.json").read_text())["status"] == "BASE_EVAL_FAILED"
+    assert json.loads((root / "all_results.json").read_text())["arms"]["G3_PLAIN"]["status"] == "NOT_RUN"

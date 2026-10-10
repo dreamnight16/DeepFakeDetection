@@ -6,12 +6,54 @@
 python experiments/run_e1010.py --dry_run
 
 CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1010.py \
-  --base_run /path/to/E0924/run > nohup_E1010.log 2>&1 &
+  > nohup_E1010.log 2>&1 &
 ```
 
-`--base_run` 指向包含原 `training/G26_B0` 的成功 E0924 运行。也可用
-`--base_checkpoint /path/to/b0.pth --base_config /path/to/train_config.json`。
-所有辅助组复用同一个原始 `effort` B0，不重新训练 B0；缺少 B0 时直接报错。
+默认先从原 CLIP 预训练权重训练 B0，完成 B0 评估后冻结它，再运行 75 个辅助配置。
+需要现有数据和 CLIP 预训练权重，不再要求保留旧 E0924 检查点。
+CLIP 位置不同可加 `--clip_pretrained_path /path/to/clip`。
+
+已有 B0 时仍可加 `--base_run /path/to/E0924/run`，或指向本次新 E1010 运行目录；
+也可用 `--base_checkpoint /path/to/b0.pth --base_config /path/to/train_config.json`。
+显式提供源目录或模型时只复用该 B0，源不存在、配置不匹配时直接报错，不偷偷重训。
+
+## G0：重新训练 B0 并查看复现指标
+
+只复跑 B0，不运行后续 75 组：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1010.py --baseline_only \
+  > nohup_E1010_B0.log 2>&1 &
+tail -f nohup_E1010_B0.log
+```
+
+训练直接复用 E0924 的 G26_B0 构建与训练入口：FF++ c23、224 输入、seed=1024，
+训练所有 CLIP block 的 LoRA 及普通线性分类头，原 CLIP 参数与 CLS embedding 冻结。
+保留原数据增强，关闭 mixup、margin、频率输入、texture crop、rank loss；
+Adam lr=2e-4、weight decay=5e-4、v1 sampler real ratio=0.30、batch size=32。
+按 CDF-v2 帧 AUC 选最好 checkpoint。`--base_n_epochs 10` 沿原循环执行 epoch 0–10，
+实际 11 轮；它与辅助分支的 `--n_epochs 10`（10 轮）是两个独立预算。
+`--base_sampler_real_ratio`、`--base_batch_size` 可显式调整 B0 条件，默认保留原设置。
+辅助的 lr、weight decay、batch 和采样比例不会改动 B0 训练条件。
+
+B0 训练完成后先用原评估入口输出八域历史 basename 视频 AUC，
+控制台直接显示七域均值（含 CDF、不含 FF++）、六独立域均值、AUC_cross 和 G。
+保存位置为 `G0/training/reproduction.json`；原训练/评估配置、结果与模型日志也位于
+`G0/training/`。原训练增强配置完整保留，后续 E1010 严格导出才关闭增强。
+
+接着 `G0/result.json` 保存严格成对导出的 full-path 视频 AUC 与 legacy 指标，
+两种口径分别记录。核对历史成绩时使用相同数据集和同一视频分组口径。
+若没有旧结果参考，报告标为 `REFERENCE_NOT_PROVIDED`，只展示新成绩，
+不自动声称数值或权重复现成功；实际是否复现仍需服务器训练结果与旧成绩比较。
+训练或历史评估失败会记录状态并停止后续辅助实验。
+
+看完 B0 后，用同一新模型运行后续组：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1010.py \
+  --base_run ./experiment_results/E1010/seed... \
+  > nohup_E1010.log 2>&1 &
+```
 
 ## 要验证什么
 
@@ -25,7 +67,7 @@ CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1010.py \
 
 ## G 分组
 
-G0 为原始 B0 的缓存和评估。其余组默认有 75 个配置：72 组辅助训练，加 3 组固定原型诊断。
+G0 为原协议 B0 的训练/复用和评估。其余组默认有 75 个配置：72 组辅助训练，加 3 组固定原型诊断。
 
 | 组 | 结构来源与读出 | 配置数 |
 | --- | --- | ---: |
@@ -106,10 +148,12 @@ MIL 对真图压低所有证据 token 的假 log odds；对假图使用温度 0.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1010.py \
-  --base_run /path/to/E0924/run --arms G4_ALL G4_RANDOM G4_TOPK \
+  --arms G4_ALL G4_RANDOM G4_TOPK \
   > nohup_E1010_G4.log 2>&1 &
 ```
 
+没有显式 B0 来源时，此命令先训练 B0，再运行三个 G4 对照。
+已有 B0 可加 `--base_run` 避免重新训练。
 G4 从 FF++ **train** 元信息中，按路径排序后使用固定 seed 分别打乱真/假帧，
 默认每类最多选 32 个唯一帧。三种方法共用这一个池，真实原型均为全部真实 patch 的均值。
 ALL 指这个训练子集的全部假图 patch，不是全 FF++ 训练集；RANDOM 和 TOPK 每张假图各选 K=16 个。
@@ -173,11 +217,12 @@ CDF 和 FF++ 单独报告。主视频 AUC 按完整视频路径汇总帧均值�
 manifest 记录 B0、相关源码、数据元信息和运行环境，识别未提交的源码变化。
 
 ```bash
-python experiments/run_e1010.py --base_run /path/to/E0924/run --preflight
-python -m pytest tests/test_e1010.py tests/test_e1010_prototypes.py tests/test_e1010_runner.py -q
+python experiments/run_e1010.py --preflight
+python -m pytest tests/test_e1010.py tests/test_e1010_baseline.py tests/test_e1010_prototypes.py tests/test_e1010_runner.py -q
 ```
 
-`--dry_run` 不导入模型、不加载权重或数据；`--preflight` 检查原 B0 身份、配置、
-数据元信息和采样要求，不代表图片、GPU 或训练环境验证成功。
+`--dry_run` 不导入模型、不加载权重或数据；`--preflight` 检查配置、
+数据元信息和采样要求，复用模式还检查 B0 文件身份；新训练模式不会提前训练 B0。
+预检不代表图片、GPU、checkpoint 加载或训练环境验证成功。
 本地测试使用随机初始化的小型真实 CLIP，检查辅助训练、梯度隔离、严格重载和成对导出；
 通过 CPU 合约测试不代表真实数据上的训练或 G4 原型评估已经完成，也不代表获得了 AUC 增益。
