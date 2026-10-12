@@ -19,5 +19,6 @@ from .effort_detector_query_ablation import EffortDetectorG22, EffortDetectorG23
 from .effort_detector_g25 import EffortDetectorG25
 from .effort_detector_g25v2 import EffortDetectorG25v2
 from .effort_detector_e1009 import EffortDetectorE1009
+from .effort_detector_e1012 import EffortDetectorE1012
 from .effort_detector_g26 import EffortDetectorG26
 from .effort_detector_g27 import EffortDetectorG27

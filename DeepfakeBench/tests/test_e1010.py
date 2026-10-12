@@ -172,6 +172,89 @@ def test_original_aux_masks_and_supervision_preserve_base(mode, supervision):
     assert all(parameter.grad is None for parameter in model.base.parameters())
 
 
+@pytest.mark.parametrize("mode", ["read_only", "cls_only", "patch_only", "full"])
+@pytest.mark.parametrize("supervision", ["max", "all"])
+def test_sdpa_aux_attention_trains_without_changing_b0(mode, supervision):
+    base = TinyB0("sdpa").eval()
+    data = {"image": torch.randn(3, 3, 8, 8)}
+    original = base(data, inference=True)
+    state = {key: value.clone() for key, value in base.state_dict().items()}
+    model = e1010.FrozenForgerySidecar(
+        base, family="aux", memory_layer=1, num_tokens=4,
+        attention_mode=mode, supervision=supervision)
+    tokens_before = model.auxiliary.evidence_tokens.detach().clone()
+    optimizer = torch.optim.AdamW(model.auxiliary.parameters(), lr=.01)
+    output = model(data)
+    attention = output["e1010"]["attention_maps"]
+    assert attention.shape == (3, 4, 4)
+    assert attention.requires_grad and torch.isfinite(attention).all()
+    assert torch.equal(output["e1010"]["cls_prob"], original["prob"])
+    assert torch.equal(output["e1010"]["global_logits"], original["cls"])
+    assert all(layer.self_attn.config._attn_implementation == "sdpa"
+               for layer in base.backbone.encoder.layers)
+    losses = model.losses(output, torch.tensor([0, 1, 1]))
+    losses["loss_diversity"].backward(retain_graph=True)
+    assert model.auxiliary.evidence_tokens.grad.abs().sum() > 0
+    optimizer.zero_grad(set_to_none=True)
+    losses["overall"].backward()
+    assert all(parameter.grad is None for parameter in base.parameters())
+    optimizer.step()
+    assert not torch.equal(tokens_before, model.auxiliary.evidence_tokens)
+    disabled = model(data, auxiliary_enabled=False)
+    assert all(torch.equal(disabled[key], original[key]) for key in ("cls", "prob", "feat"))
+    assert all(torch.equal(value, state[key]) for key, value in base.state_dict().items())
+    assert all(layer.self_attn.config._attn_implementation == "sdpa"
+               for layer in base.backbone.encoder.layers)
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_sdpa_g25_helpers_return_attention_and_preserve_parameter_isolation(isolated):
+    base = TinyB0("sdpa").eval()
+    data = {"image": torch.randn(2, 3, 8, 8)}
+    original = base(data)
+    evidence = torch.nn.Parameter(torch.randn(1, 3, 16) * .02)
+    if isolated:
+        outputs = e1010.g25v2.forward_isolated_evidence(
+            base.backbone, data["image"], evidence, 1, "read_only")
+        features = outputs["evidence_features"]
+    else:
+        outputs = e1010.g25.forward_with_evidence(
+            base.backbone, data["image"], evidence, 1, "read_only")
+        features = outputs["features"][:, 1:]
+    attention = outputs["attention_maps"]
+    assert attention.shape == (2, 3, 4)
+    assert attention.requires_grad and torch.isfinite(attention).all()
+    (features.square().mean() + attention.square().mean()).backward()
+    assert evidence.grad.abs().sum() > 0
+    if isolated:
+        assert all(parameter.grad is None for parameter in base.parameters())
+    assert all(layer.self_attn.config._attn_implementation == "sdpa"
+               for layer in base.backbone.encoder.layers)
+    repeated = base(data)
+    assert all(torch.equal(repeated[key], original[key]) for key in ("cls", "prob", "feat"))
+
+
+def test_sdpa_backend_restored_when_auxiliary_layer_raises():
+    base = TinyB0("sdpa").eval()
+    data = {"image": torch.randn(2, 3, 8, 8)}
+    original = base(data)
+
+    def fail_auxiliary(module, args):
+        raise RuntimeError("injected auxiliary failure")
+
+    hook = base.backbone.encoder.layers[-1].register_forward_pre_hook(fail_auxiliary)
+    try:
+        with pytest.raises(RuntimeError, match="injected auxiliary failure"):
+            e1010.g25.forward_with_evidence(
+                base.backbone, data["image"], torch.randn(1, 3, 16), 1, "read_only")
+    finally:
+        hook.remove()
+    assert all(layer.self_attn.config._attn_implementation == "sdpa"
+               for layer in base.backbone.encoder.layers)
+    repeated = base(data)
+    assert all(torch.equal(repeated[key], original[key]) for key in ("cls", "prob", "feat"))
+
+
 def test_original_g18_structure_projection_and_score_are_preserved():
     model = sidecar("lfeq", lfeq_fusion_weight=.5)
     model.eval()

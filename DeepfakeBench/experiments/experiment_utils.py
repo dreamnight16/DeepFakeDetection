@@ -476,7 +476,7 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
                  'g25_supervision', 'g25_fusion_weight', 'g25_evidence_weight',
                  'g25_diversity_weight', 'clip_pretrained_path', 'full_train_head',
                  'g25v2_aux_grad_mode', 'g25v2_score_mode',
-                 'e1009_tuning',
+                 'e1009_tuning', 'e1012_settings',
                  'g26_num_tokens', 'g26_insert_layer', 'g26_mil_temperature',
                  'g26_evidence_weight', 'g26_gate_width', 'g26_aux_max_weight',
                  'g26_score_mode',
@@ -492,6 +492,9 @@ def evaluate_model(config, ckpt_path, test_datasets, train_dataset, output_dir, 
         for key in ('manualSeed', 'use_mixup', 'mixup_mode', 'margin_loss_mode',
                     'use_texture_crop', 'optimizer_wrapper', 'rank_loss_weight'):
             extra_config[key] = config[key]
+    if config.get('model_name') == 'effort_e1012':
+        # E1012 reports fixed-threshold errors; its wrapper has no adaptive queue.
+        extra_config['use_adaptive_threshold'] = False
     if config.get('model_name') in ('effort_g26', 'effort_g27'):
         extra_config['multi_crop'] = config.get('multi_crop', False)
     if config.get('e0924_protocol'):

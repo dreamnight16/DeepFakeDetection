@@ -1,5 +1,7 @@
 """G25 token injection using the existing CLIP encoder blocks and projections."""
 
+from contextlib import contextmanager
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -11,6 +13,21 @@ MASK_MODES = {
     "patch_only": (False, True),
     "full": (True, True),
 }
+
+
+@contextmanager
+def eager_attention_for_weights(layer, output_attentions):
+    """Request weights locally; restore CLIP's shared config before B0 runs."""
+    config = getattr(layer.self_attn, "config", None)
+    implementation = getattr(config, "_attn_implementation", None)
+    if not output_attentions or implementation is None:
+        yield
+        return
+    try:
+        config._attn_implementation = "eager"
+        yield
+    finally:
+        config._attn_implementation = implementation
 
 
 def make_attention_mask(hidden, original_length, mode):
@@ -54,10 +71,11 @@ def forward_with_evidence(vision, images, evidence_tokens, insert_layer, mode,
             hidden = torch.cat((hidden, extra), dim=1)
             attention_mask = make_attention_mask(hidden, original_length, mode)
         need_attention = output_attentions and index == len(layers) - 1
-        result = layer(
-            hidden, attention_mask=attention_mask, causal_attention_mask=None,
-            output_attentions=need_attention,
-        )
+        with eager_attention_for_weights(layer, need_attention):
+            result = layer(
+                hidden, attention_mask=attention_mask, causal_attention_mask=None,
+                output_attentions=need_attention,
+            )
         hidden = result[0]
         if need_attention:
             if len(result) < 2 or result[1] is None:

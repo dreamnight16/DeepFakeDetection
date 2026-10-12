@@ -131,9 +131,11 @@ class ForgeryAuxiliary(nn.Module):
         attention = None
         for index in range(settings["memory_layer"], len(vision.encoder.layers)):
             need_attention = settings["diversity_weight"] > 0 and index == len(vision.encoder.layers) - 1
-            outputs = g25v2.call_with_detached_parameters(
-                vision.encoder.layers[index], hidden, attention_mask=mask, causal_attention_mask=None,
-                output_attentions=need_attention)
+            layer = vision.encoder.layers[index]
+            with g25.eager_attention_for_weights(layer, need_attention):
+                outputs = g25v2.call_with_detached_parameters(
+                    layer, hidden, attention_mask=mask, causal_attention_mask=None,
+                    output_attentions=need_attention)
             hidden = outputs[0]
             if need_attention:
                 if len(outputs) < 2 or outputs[1] is None:

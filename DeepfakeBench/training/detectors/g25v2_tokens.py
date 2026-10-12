@@ -2,7 +2,7 @@
 
 import torch
 
-from .g25_tokens import make_attention_mask
+from .g25_tokens import eager_attention_for_weights, make_attention_mask
 
 
 def call_with_detached_parameters(module, *args, **kwargs):
@@ -50,8 +50,9 @@ def forward_isolated_evidence(vision, images, evidence_tokens, insert_layer, mod
             need_attention = output_attentions and index == len(layers) - 1
             kwargs = dict(attention_mask=mask, causal_attention_mask=None,
                           output_attentions=need_attention)
-            outputs = (call_with_detached_parameters(layer, hidden, **kwargs)
-                       if detached_parameters else layer(hidden, **kwargs))
+            with eager_attention_for_weights(layer, need_attention):
+                outputs = (call_with_detached_parameters(layer, hidden, **kwargs)
+                           if detached_parameters else layer(hidden, **kwargs))
             hidden = outputs[0]
             if need_attention:
                 if len(outputs) < 2 or outputs[1] is None:
