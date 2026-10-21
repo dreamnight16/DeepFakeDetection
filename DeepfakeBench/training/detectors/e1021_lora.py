@@ -55,16 +55,25 @@ def lora_parameter_groups(backbone):
 
 
 def class_conditional_backward(losses, real_parameters, fake_parameters, shared_parameters):
+    real_parameters = tuple(real_parameters)
+    fake_parameters = tuple(fake_parameters)
+    shared_parameters = tuple(shared_parameters)
+    all_parameters = real_parameters + fake_parameters + shared_parameters
     groups = ((losses["real_loss"], real_parameters),
               (losses["fake_loss"], fake_parameters),
               (losses["overall"], shared_parameters))
     for index, (loss, parameters) in enumerate(groups):
-        parameters = tuple(parameters)
         # Single-class validation is valid; an absent class has no Adam update.
         if not loss.requires_grad:
             for parameter in parameters:
                 parameter.grad = None
             continue
-        gradients = torch.autograd.grad(loss, parameters, retain_graph=index < 2)
+        # A head-only final call stops at the classifier and leaves the retained
+        # encoder activations alive through the epoch's loss recorders. Visit all
+        # trainable paths to free them, keeping only the shared-head gradients.
+        targets = all_parameters if index == 2 else parameters
+        gradients = torch.autograd.grad(loss, targets, retain_graph=index < 2)
+        if index == 2:
+            gradients = gradients[len(real_parameters) + len(fake_parameters):]
         for parameter, gradient in zip(parameters, gradients):
             parameter.grad = gradient

@@ -1,9 +1,11 @@
 """Exercise the actual Trainer step and testall configuration forwarding."""
 
 import ast
+import gc
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import weakref
 
 import numpy as np
 import pytest
@@ -12,6 +14,7 @@ from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from test_e1021 import config, data, detector
+import test_e1021
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,3 +77,49 @@ def test_testall_reconstructs_unequal_ranks_and_original_lora_backend(tmp_path):
     assert forwarded["e1021_real_rank"] == 2
     assert forwarded["e1021_fake_rank"] == 6
     assert forwarded["use_loralib"] is True
+
+
+@pytest.mark.parametrize("backend", ["eager", "sdpa"])
+@pytest.mark.parametrize("ranks", [(2, 2), (4, 4), (2, 6), (6, 2)])
+def test_actual_trainer_releases_saved_tensors_with_live_loss_recorders(detector, monkeypatch, backend, ranks):
+    original_vision = test_e1021.tiny_vision
+    monkeypatch.setattr(test_e1021, "tiny_vision",
+                        lambda lora: original_vision(lora=lora, implementation=backend))
+    model = detector[0](config(*ranks)).train()
+    method = function("training/trainer/trainer_v2.py", "train_step", "Trainer")
+    namespace = {"DDP": DDP, "SAM": type("SAM", (), {}), "PCGrad": type("PCGrad", (), {})}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "trainer_v2.py", "exec"), namespace)
+    tree = ast.parse((ROOT / "training/metrics/base_metrics_class.py").read_text())
+    recorder = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Recorder")
+    exec(compile(ast.Module(body=[recorder], type_ignores=[]), "base_metrics_class.py", "exec"), namespace)
+    recorders = {name: namespace["Recorder"]() for name in ("overall", "real_loss", "fake_loss")}
+    trainer = SimpleNamespace(model=model, optimizer=torch.optim.Adam(model.parameters(), lr=.0002),
+                              config={"optimizer": {"type": "adam"}, "model_name": "effort_e1021"})
+    saved = []
+
+    class SavedTensor:
+        def __init__(self, tensor):
+            self.tensor = tensor.detach()
+
+    def pack(tensor):
+        item = SavedTensor(tensor)
+        saved.append(weakref.ref(item))
+        return item
+
+    # The real epoch logger accumulates loss tensors for 300 batches. Those
+    # references must not keep the encoder's saved activations after a step.
+    steps = 305 if backend == "sdpa" and ranks == (2, 2) else 6
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda item: item.tensor):
+        for step in range(steps):
+            losses, predictions = namespace["train_step"](trainer, data())
+            for name, value in losses.items():
+                recorders[name].update(value)
+            if step % 300 == 0:
+                for recorder in recorders.values():
+                    recorder.clear()
+            del losses, predictions, value
+            if step in (0, 1, 2, steps - 1) or step % 300 == 0:
+                gc.collect()
+            live_bytes = sum(item().tensor.numel() * item().tensor.element_size()
+                             for item in saved if item() is not None)
+            assert live_bytes == 0, f"batch {step}: loss recorders retain {live_bytes} activation bytes"
