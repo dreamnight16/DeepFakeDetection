@@ -1393,7 +1393,7 @@ class Trainer(object):
                 self.optimizer.step()
             else:
                 self.optimizer.zero_grad()
-                if self.config.get('model_name') == 'effort_e1021':
+                if self.config.get('model_name') in ('effort_e1021', 'effort_e1025_soft'):
                     self.model.backward(losses)
                 else:
                     losses['overall'].backward()

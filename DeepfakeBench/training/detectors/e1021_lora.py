@@ -54,13 +54,19 @@ def lora_parameter_groups(backbone):
     return real, fake
 
 
-def class_conditional_backward(losses, real_parameters, fake_parameters, shared_parameters):
+def class_conditional_backward(losses, real_parameters, fake_parameters, shared_parameters, beta=0.0):
+    if not 0.0 <= beta <= 1.0:
+        raise ValueError("LoRA routing beta must be finite and between 0 and 1")
     real_parameters = tuple(real_parameters)
     fake_parameters = tuple(fake_parameters)
     shared_parameters = tuple(shared_parameters)
     all_parameters = real_parameters + fake_parameters + shared_parameters
-    groups = ((losses["real_loss"], real_parameters),
-              (losses["fake_loss"], fake_parameters),
+    real_loss, fake_loss = losses["real_loss"], losses["fake_loss"]
+    # Keep absent-class gradients as None under the original hard routing.
+    if beta > 0:
+        real_loss, fake_loss = real_loss + beta * fake_loss, beta * real_loss + fake_loss
+    groups = ((real_loss, real_parameters),
+              (fake_loss, fake_parameters),
               (losses["overall"], shared_parameters))
     for index, (loss, parameters) in enumerate(groups):
         # Single-class validation is valid; an absent class has no Adam update.
