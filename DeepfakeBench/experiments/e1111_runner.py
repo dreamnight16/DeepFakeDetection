@@ -11,9 +11,35 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_RUN = ROOT / "experiment_results/E0924/seed1024_20260930_110618_353460_2771190"
 
 
+def resolve_source(args):
+    import run_e1001 as previous
+
+    source_args = argparse.Namespace(base_run=args.base_run, base_checkpoint=args.base_checkpoint,
+                                    base_config=args.base_config)
+    if not any((source_args.base_run, source_args.base_checkpoint, source_args.base_config)):
+        source_args.base_run = DEFAULT_BASE_RUN
+    if source_args.base_run and (source_args.base_checkpoint or source_args.base_config):
+        raise ValueError("Use --base_run OR --base_checkpoint with --base_config")
+    run_path = Path(source_args.base_run) if source_args.base_run else None
+    report_path = run_path / "all_results.json" if run_path else None
+    if report_path and report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+        if report.get("experiment") == "E1111" and report.get("branch") == "E1111B":
+            baseline = report.get("arms", {}).get("B0", {})
+            if baseline.get("status") != "OK" or baseline.get("settings", {}).get("model_name") != "effort":
+                raise ValueError("The source E1111 B0 must be a successful original-CE run")
+            source_args = argparse.Namespace(base_run=None, base_checkpoint=Path(baseline["ckpt"]),
+                                            base_config=run_path / "B0/train_config.json")
+            source = previous.resolve_source(source_args)
+            if source["base_sha256"] != baseline.get("checkpoint_sha256"):
+                raise ValueError("Retrained B0 checkpoint hash differs from its result")
+            source["origin"] = "E1111B/B0: independently retrained original CE"
+            return source
+    return previous.resolve_source(source_args)
+
+
 def resolve_inputs(args):
     import yaml
-    import run_e1001 as previous
     from e1111.shared_crop import raw_video_path
     from e1111.audit import source_splits
     from e1111.protocol import protocol
@@ -21,11 +47,7 @@ def resolve_inputs(args):
 
     if args.seed != protocol()["seed"]:
         raise ValueError("This frozen E1111A protocol uses seed=1024")
-    source_args = argparse.Namespace(base_run=args.base_run, base_checkpoint=args.base_checkpoint,
-                                    base_config=args.base_config)
-    if not any((source_args.base_run, source_args.base_checkpoint, source_args.base_config)):
-        source_args.base_run = DEFAULT_BASE_RUN
-    source = previous.resolve_source(source_args)
+    source = resolve_source(args)
     config = copy.deepcopy(source["config"])
     labels = yaml.safe_load((ROOT / "training/config/test_config.yaml").read_text(encoding="utf-8"))["label_dict"]
     for name, value in labels.items():

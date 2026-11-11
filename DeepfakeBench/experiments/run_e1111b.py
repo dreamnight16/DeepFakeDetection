@@ -19,6 +19,7 @@ BASE = previous.previous
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--arms", nargs="+", choices=["B0", "PUCE"], default=["B0", "PUCE"])
     parser.add_argument("--prior", type=float, default=.3)
     parser.add_argument("--lams", type=float, nargs="+", default=[0., .01, .05, .1])
     parser.add_argument("--output_dir", type=Path, default=ROOT / "experiment_results/E1111/E1111B")
@@ -34,23 +35,28 @@ def build_parser():
 
 
 def validate_arguments(parser, args):
+    if len(args.arms) != len(set(args.arms)):
+        parser.error("Do not repeat arms")
     if not math.isfinite(args.prior) or not 0 < args.prior < 1:
         parser.error("prior must be finite and in (0, 1)")
     if (len(set(args.lams)) != len(args.lams)
             or any(not math.isfinite(x) or x < 0 for x in args.lams)):
         parser.error("lams must be distinct, finite and nonnegative")
-    BASE.validate_arguments(parser, argparse.Namespace(**vars(args), arms=["B0"],
-                                                     real_rank=None, fake_rank=None))
+    BASE.validate_arguments(parser, argparse.Namespace(**{
+        **vars(args), "arms": ["B0"], "real_rank": None, "fake_rank": None}))
 
 
 def arm_settings(args):
-    return {f"CE_L0" if lam == 0 else f"PUCE_P{args.prior:g}_L{lam:g}":
-            {"model_name": "effort_e1111b", "e1025_prior": args.prior, "e1111_lam": lam}
-            for lam in args.lams}
+    settings = {"B0": {"model_name": "effort"}} if "B0" in args.arms else {}
+    if "PUCE" in args.arms:
+        settings.update({f"CE_L0" if lam == 0 else f"PUCE_P{args.prior:g}_L{lam:g}":
+                         {"model_name": "effort_e1111b", "e1025_prior": args.prior, "e1111_lam": lam}
+                         for lam in args.lams})
+    return settings
 
 
 def plan(args):
-    protocol = BASE.plan(argparse.Namespace(**vars(args), arms=["B0"]))
+    protocol = BASE.plan(argparse.Namespace(**{**vars(args), "arms": ["B0"]}))
     protocol.update(experiment="E1111", branch="E1111B", arms=arm_settings(args),
                     reference_experiment="E1025 single-LoRA B0/PU",
                     objective="CE(logits,labels) + lam*clamp(-mean(logp1[U])+prior*mean(logp1[R]),min=0)",
@@ -58,6 +64,9 @@ def plan(args):
                     prior_meaning="real-class prior inside U, independent of sampler_real_ratio",
                     validation_loss="CE; same historical Celeb-DF-v2 frame-AUC checkpoint selection",
                     gradient_clipping=None)
+    protocol["baseline"] = "independently retrained original effort + batch CE; same seed/config as PUCE"
+    protocol["arm_objectives"] = {arm: "original batch CE" if arm == "B0" else protocol["objective"]
+                                  for arm in arm_settings(args)}
     protocol["trainable"] = {"model": "original rank-4 LoRA and full head",
                             "frozen": "original CLIP weights and CLS embedding"}
     return protocol

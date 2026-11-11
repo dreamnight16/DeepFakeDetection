@@ -137,13 +137,43 @@ def test_runner_isolated_small_lambdas_and_original_config(monkeypatch, tmp_path
     args = parser.parse_args([])
     runner.validate_arguments(parser, args)
     settings = runner.arm_settings(args)
-    assert {x["e1111_lam"] for x in settings.values()} == {0., .01, .05, .1}
+    assert len(settings) == 5 and settings["B0"] == {"model_name": "effort"}
+    assert {x["e1111_lam"] for x in settings.values() if "e1111_lam" in x} == {0., .01, .05, .1}
     for arm in settings:
         actual = runner.build_arm_config(args, arm, tmp_path, config_builder(), True)
         assert actual["manualSeed"] == 1024 and actual["train_batchSize"] == 32
         assert actual["frame_num"] == {"train": 8, "test": 8}
         assert actual["optimizer"]["adam"]["lr"] == .0002
         assert actual["optimizer"]["adam"]["weight_decay"] == .0005
-        assert actual["e1025_prior"] == .3
-        assert actual["model_name"] == "effort_e1111b"
+        assert actual["model_name"] == settings[arm]["model_name"]
+        if arm == "B0":
+            assert "e1111_lam" not in actual and "e1025_prior" not in actual
+        else:
+            assert actual["e1025_prior"] == .3
     assert runner.plan(args)["branch"] == "E1111B"
+
+
+def test_native_b0_config_is_exactly_the_existing_e1025_baseline(monkeypatch, tmp_path):
+    import argparse
+    from test_e1021_runner import config_builder
+
+    script = ROOT / "experiments/run_e1111b.py"
+    monkeypatch.syspath_prepend(str(script.parent))
+    spec = importlib.util.spec_from_file_location("e1111_native_b0_test", script)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    parser = runner.build_parser()
+    args = parser.parse_args(["--arms", "B0"])
+    runner.validate_arguments(parser, args)
+    assert runner.arm_settings(args) == {"B0": {"model_name": "effort"}}
+    assert runner.plan(args)["arm_objectives"] == {"B0": "original batch CE"}
+    old_args = argparse.Namespace(**{**vars(args), "arms": ["B0"]})
+    for training in (True, False):
+        actual = runner.build_arm_config(args, "B0", tmp_path, config_builder(), training)
+        previous = runner.previous.build_arm_config(old_args, "B0", tmp_path, config_builder(), training)
+        assert actual == previous
+    only_regularizer = parser.parse_args(["--arms", "PUCE", "--lams", ".01"])
+    runner.validate_arguments(parser, only_regularizer)
+    assert list(runner.arm_settings(only_regularizer)) == ["PUCE_P0.3_L0.01"]
+    with pytest.raises(SystemExit):
+        runner.validate_arguments(parser, parser.parse_args(["--arms", "B0", "B0"]))

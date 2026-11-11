@@ -136,3 +136,30 @@ def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypat
         assert calls == ["inventory", "pairing", "crop", "audit", "features", "s0", "calibrate",
                          "export", "score", "export", "score", "attribution"]
         assert result["status"] == "DEVELOPMENT_COMPLETE"
+
+
+def test_a_accepts_successful_native_e1111_b0_without_using_the_old_checkpoint(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    runner = load_runner(monkeypatch)
+    baseline = {"status": "OK", "settings": {"model_name": "effort"},
+                "ckpt": str(tmp_path / "new_B0.pth"), "checkpoint_sha256": "fresh_sha"}
+    report = {"experiment": "E1111", "branch": "E1111B", "arms": {"B0": baseline}}
+    (tmp_path / "all_results.json").write_text(json.dumps(report))
+    seen = []
+
+    def resolve(args):
+        seen.append(args)
+        return {"base_sha256": "fresh_sha", "config": {"model_name": "effort"}}
+
+    monkeypatch.setitem(sys.modules, "run_e1001", SimpleNamespace(resolve_source=resolve))
+    args = argparse.Namespace(base_run=tmp_path, base_checkpoint=None, base_config=None)
+    source = runner.resolve_source(args)
+    assert seen[0].base_run is None
+    assert seen[0].base_checkpoint == tmp_path / "new_B0.pth"
+    assert seen[0].base_config == tmp_path / "B0/train_config.json"
+    assert source["origin"].startswith("E1111B/B0")
+    baseline["settings"]["model_name"] = "effort_e1111b"
+    (tmp_path / "all_results.json").write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="original-CE"):
+        runner.resolve_source(args)

@@ -12,7 +12,14 @@
 
 ## 按原实验方式直接启动
 
-在服务器原环境的 DeepfakeBench 目录中：
+在服务器原环境的 DeepfakeBench 目录中。**只重新训练最基础B0对照**：
+
+    CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111b.py --arms B0 \
+      > nohup_E1111_B0.log 2>&1 &
+
+这组使用原 effort 检测器：CLIP ViT-L/14、原单LoRA rank4、CLS/pooler原二分类头、整批平均CE。从CLIP预训练重新初始化，不加载历史detector checkpoint。沿用E1025 B0的FF++ c23、8/8帧、batch32、real ratio0.3、seed1024、Adam lr2e-4/wd5e-4、原增强和CDF-v2 frame-AUC选点。结果同时保留完整路径和历史basename的视频AUC口径；它是独立原版B0，不用新损失的CE_L0替代。
+
+同时运行新B0和PUCE四组时，直接使用默认命令（共五组）：
 
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111a.py \
       --base_run ./experiment_results/E0924/seed1024_20260930_110618_353460_2771190 \
@@ -21,11 +28,13 @@
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111b.py \
       > nohup_E1111B.log 2>&1 &
 
-A复用已有B0，默认入口自动执行：索引盘点 → 内容配对 → 原视频共享裁剪 → P-D7审计 → 特征提取 → S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认运行CE对照和三个小权重正则配置。
+A复用已有B0，默认入口自动执行：索引盘点 → 内容配对 → 原视频共享裁剪 → P-D7审计 → 特征提取 → S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
 
 看日志：tail -f nohup_E1111A.log 或 tail -f nohup_E1111B.log。A的all_results.json保存当前阶段和停止原因；每次启动创建独立运行目录。P-D7等科研判据不通过时如实停止，不修改门槛。
 
 严格共享裁剪需要已有的**原始c23视频**。默认按同一数据根目录中的 FaceForensics++/.../c23/videos/视频名.mp4 查找；原视频在其他目录时加 --raw_root /实际根目录。关键点权重优先使用 preprocessing/shape_predictor_81_face_landmarks.dat，兼容 preprocessing/dlib_tools 下的旧路径，也可用 --predictor_path 指定。图片、索引、CLIP路径继承B0配置，仍支持旧实验同名覆盖参数。A在启动时检查这些输入；独立裁剪的PNG不能替代原视频来证明同一裁剪变换。
+
+训练结束后，终端会打印该次运行目录下的all_results.json。A可将**该次新运行目录**作为 --base_run；程序只接受成功的原生B0、读取B0/train_config.json并校验checkpoint SHA，不会误取PUCE权重。早期示例中的E0924路径仅用于旧B0复现；需要新B0时改用新运行目录。B0历史对照仍使用8帧评估；A的32帧统计结果单列，不与其直接混算。
 
 ## E1111A：预注册执行规则
 
@@ -145,8 +154,12 @@ S2同时报告TPR(γ)曲线、内点/端点最优和独立D1。**ρcap不含γ�
 
 lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时含两类；风险被截断仍保留CE梯度。验证批可只有一类，日志保持普通CE。prior是U内的真实类先验设定，与batch real ratio不同；将已标注伪造作为U属于给定的启发式正则。
 
-默认四组 lam={0,0.01,0.05,0.1}、prior固定0.3。CE_L0为同代码路径CE对照，不重复增加B0。各组从同一CLIP预训练独立初始化：单LoRA rank4、完整原二分类头、seed1024、FF++ c23、8/8帧、batch32、real ratio0.3、Adam lr2e-4/wd5e-4、epoch0..10。沿用E1025增强、Celeb-DF-v2 frame-AUC选点与完整路径视频聚合，关闭Mixup，不叠加SOFT路由。
+默认先运行独立原版B0，再运行四组lam={0,0.01,0.05,0.1}、prior固定0.3。B0使用effort原CE实现；CE_L0保留为新损失接口的等价性校验，两者同seed，不当作独立种子重复。各组从同一CLIP预训练独立初始化：单LoRA rank4、完整原二分类头、seed1024、FF++ c23、8/8帧、batch32、real ratio0.3、Adam lr2e-4/wd5e-4、epoch0..10。沿用E1025增强、Celeb-DF-v2 frame-AUC选点与完整路径视频聚合，关闭Mixup，不叠加SOFT路由。
 
+    # 只训练原版B0
+    python experiments/run_e1111b.py --arms B0
+    # 只训练正则分支；默认包含新B0
+    python experiments/run_e1111b.py --arms PUCE
     python experiments/run_e1111b.py --dry_run
     python experiments/run_e1111b.py \
       --prior 0.3 --lams 0 0.01 0.05 0.1 \
