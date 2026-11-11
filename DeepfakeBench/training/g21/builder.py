@@ -11,8 +11,19 @@ from .manifest import load_pairs, relative_path
 METHODS = ("FF-DF", "FF-F2F", "FF-FS", "FF-NT")
 ALL_METHODS = METHODS
 
+EXCLUDED_KEY = "excluded"
+EXCLUDE_REASON_KEY = "exclude_reason"
+EXCLUDE_DETAIL_KEY = "exclude_detail"
+EXPLICIT_EXCLUSION = "explicit_exclusion"
+INSUFFICIENT_INTERSECTION = "insufficient_frame_intersection"
+# The funnel always reports these machine-readable reasons, even at zero, so an
+# operator can diff runs without the schema shifting underneath them.
+EXCLUSION_REASONS = (EXPLICIT_EXCLUSION, INSUFFICIENT_INTERSECTION)
+
 
 def mapping_template() -> dict:
+    # No rule carries an exclusion marker: an unverified rule must fail loudly
+    # rather than masquerade as an intentional opt-out.
     return {
         "schema_version": 1,
         "rules": {
@@ -39,20 +50,49 @@ def _frames(entry: dict) -> dict[int, str]:
     return out
 
 
-def _rule(mapping: dict, method: str, key: str) -> dict:
+def _merged_rule(mapping: dict, method: str, key: str) -> dict:
+    """Merge a method-level rule with any per-video override before validation."""
     rule = dict(mapping.get("rules", {}).get(method, {}))
     rule.update(mapping.get("overrides", {}).get(f"{method}/{key}", {}))
+    return rule
+
+
+def _exclusion(rule: dict, method: str, key: str) -> dict | None:
+    """Return a structured exclusion record when the merged rule opts out.
+
+    The marker is explicit and opt-in and takes precedence over the verified
+    gate, so a per-video override carrying it can exclude one video even when
+    its method-level rule is verified. A rule that does not set the marker is
+    still held to the verified/evidence contract by ``_require_verified``.
+    """
+    if rule.get(EXCLUDED_KEY) is not True:
+        return None
+    reason = rule.get(EXCLUDE_REASON_KEY)
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError(
+            f"exclusion requires a nonempty {EXCLUDE_REASON_KEY}: {method}/{key}"
+        )
+    record = {
+        "method": method,
+        "fake_key": key,
+        "reason_code": EXPLICIT_EXCLUSION,
+        "reason": reason.strip(),
+    }
+    if EXCLUDE_DETAIL_KEY in rule:
+        record["detail"] = rule[EXCLUDE_DETAIL_KEY]
+    return record
+
+
+def _require_verified(rule: dict, method: str, key: str) -> None:
     if (
         rule.get("verified") is not True
         or not isinstance(rule.get("evidence"), str)
         or not rule["evidence"].strip()
     ):
         raise ValueError(f"unverified mapping rule: {method}/{key}")
-    return rule
 
 
-def _reference(mapping: dict, method: str, key: str) -> tuple[str, list[str], dict]:
-    rule = _rule(mapping, method, key)
+def _reference(rule: dict, method: str, key: str) -> tuple[str, list[str]]:
     ids = key.split("_")
     if len(ids) != 2 or not all(x.isdigit() for x in ids):
         raise ValueError(f"unsupported FF++ source identifiers: {key}")
@@ -61,7 +101,51 @@ def _reference(mapping: dict, method: str, key: str) -> tuple[str, list[str], di
         raise ValueError(
             f"reference_component must explicitly be 0 or 1: {method}/{key}"
         )
-    return ids[component], sorted(set(ids)), rule
+    return ids[component], sorted(set(ids))
+
+
+def _funnel_bucket() -> dict:
+    return {
+        "fake_videos_seen": 0,
+        "paired": 0,
+        "excluded": 0,
+        "excluded_by_reason": {},
+    }
+
+
+def _empty_funnel() -> dict:
+    return {
+        "overall": _funnel_bucket(),
+        "by_method": {m: _funnel_bucket() for m in METHODS},
+    }
+
+
+def _record_seen(funnel: dict, method: str) -> None:
+    funnel["overall"]["fake_videos_seen"] += 1
+    funnel["by_method"][method]["fake_videos_seen"] += 1
+
+
+def _record_paired(funnel: dict, method: str) -> None:
+    funnel["overall"]["paired"] += 1
+    funnel["by_method"][method]["paired"] += 1
+
+
+def _record_excluded(funnel: dict, method: str, reason_code: str) -> None:
+    for bucket in (funnel["overall"], funnel["by_method"][method]):
+        bucket["excluded"] += 1
+        reasons = bucket["excluded_by_reason"]
+        reasons[reason_code] = reasons.get(reason_code, 0) + 1
+
+
+def _finalize_funnel(funnel: dict) -> dict:
+    buckets = [funnel["overall"], *(funnel["by_method"][m] for m in METHODS)]
+    for bucket in buckets:
+        present = bucket["excluded_by_reason"]
+        bucket["excluded_by_reason"] = {
+            code: present.get(code, 0)
+            for code in sorted(set(present) | set(EXCLUSION_REASONS))
+        }
+    return funnel
 
 
 def build_ffpp(
@@ -77,15 +161,27 @@ def build_ffpp(
     if output.exists():
         raise FileExistsError(f"manifest output already exists: {output}")
     pairs, exclusions = [], []
+    funnel = _empty_funnel()
     real_train = data["FF-real"]["train"]["c23"]
     for method in METHODS:
         for key, entry in sorted(data[method]["train"]["c23"].items()):
-            ref, lineage, rule = _reference(mapping, method, key)
+            _record_seen(funnel, method)
+            rule = _merged_rule(mapping, method, key)
+            # Precedence: an explicit exclusion marker wins over the verified
+            # gate, so an opt-out is never mistaken for a missing verification.
+            exclusion = _exclusion(rule, method, key)
+            if exclusion is not None:
+                exclusions.append(exclusion)
+                _record_excluded(funnel, method, exclusion["reason_code"])
+                continue
+            _require_verified(rule, method, key)
+            ref, lineage = _reference(rule, method, key)
             if any(x not in real_train for x in lineage):
                 raise ValueError(
                     f"source missing from official train split: {method}/{key}"
                 )
             real, fake = _frames(real_train[ref]), _frames(entry)
+            explicit = rule.get("frame_matches") is not None
             matches = rule.get("frame_matches")
             if matches is None:
                 if rule.get("same_original_index_verified") is not True:
@@ -109,13 +205,19 @@ def build_ffpp(
             if any(matches[i][1] >= matches[i + 1][1] for i in range(len(matches) - 1)):
                 raise ValueError("frame alignment must be monotone and one-to-one")
             if len(matches) < 2:
-                exclusions.append(
-                    {
-                        "method": method,
-                        "fake_key": key,
-                        "reason": "fewer than two matched frames",
-                    }
-                )
+                record = {
+                    "method": method,
+                    "fake_key": key,
+                    "reason_code": INSUFFICIENT_INTERSECTION,
+                    "reason": "fewer than two matched frames",
+                    "real_available": len(real),
+                    "fake_available": len(fake),
+                    "intersection": len(real.keys() & fake.keys()),
+                }
+                if explicit:
+                    record["matched_moments"] = len(matches)
+                exclusions.append(record)
+                _record_excluded(funnel, method, INSUFFICIENT_INTERSECTION)
                 continue
             pairs.append(
                 {
@@ -144,6 +246,7 @@ def build_ffpp(
                     ],
                 }
             )
+            _record_paired(funnel, method)
     if {p["method"] for p in pairs} != set(METHODS):
         raise ValueError("a training method has no valid mapped pairs")
     output.mkdir(parents=True)
@@ -160,6 +263,7 @@ def build_ffpp(
             "dataset_json": file_digest(dataset_json),
             "pair_map": file_digest(pair_map),
         },
+        "funnel": _finalize_funnel(funnel),
     }
     atomic_json(output / "manifest_report.json", report)
     return report

@@ -49,8 +49,11 @@ G21 测试使用独立的概率文件和图片目录，避免多个实验写同�
 ## 模块与数据流
 
 ```text
+experiments/verify_g21_pairing.py
+    → 图像内容核验 A/B 候选 + 时间线兼容性 → pair_map.json（含逐视频排除与审计）
+
 experiments/build_g21_manifest.py
-    → 经核验的映射规则 + 原 FF++ JSON → pairs_train.jsonl
+    → 经核验的映射规则 / pair_map + 原 FF++ JSON → pairs_train.jsonl
 
 experiments/run_g21.py run
     → preflight（不加载模型）
@@ -120,6 +123,20 @@ python experiments/build_g21_manifest.py template --output /path/to/g21_pair_map
 
 上述帧对应也仅演示格式，不代表实际正确映射。映射需单调、一对一，且所有索引在 JSON 中存在；每对不足2帧将记录排除原因。若某方法没有足够4个不同来源，preflight失败。
 
+不需要某个视频（或整个方法）时，在规则或 `overrides` 条目上写显式排除标记。**没有标记且 `verified != true` 仍然直接抛错**，排除是显式选择而非默认行为：
+
+```json
+{
+  "FF-DF/001_870": {
+    "excluded": true,
+    "exclude_reason": "manual_review",
+    "exclude_detail": {"note": "背景与两侧均不符，留待人工核对"}
+  }
+}
+```
+
+`exclude_reason` 必须是非空字符串。构建器记录该条排除后继续处理其余条目。按方法排除会让该方法无配对，随后触发"某训练方法无有效配对"的硬失败——这是刻意的：G21 不允许静默丢掉一个方法。
+
 ```bash
 python experiments/build_g21_manifest.py build \
   --dataset-json preprocessing/dataset_json/FaceForensics++.json \
@@ -127,7 +144,45 @@ python experiments/build_g21_manifest.py build \
   --output /path/to/g21_manifest
 ```
 
-输出 `pairs_train.jsonl`、`manifest_report.json`，包含四方法配对数量、排除原因及来源文件哈希。原测试 JSON 不转换、不改写。
+输出 `pairs_train.jsonl`、`manifest_report.json`，包含四方法配对数量、排除原因及来源文件哈希。`manifest_report.json` 的 `funnel` 给出每方法与总体的 见过的伪造视频 / 成对 / 排除（按原因码）计数；`insufficient_frame_intersection` 的排除另带 `real_available`/`fake_available`/`intersection` 计数。原测试 JSON 不转换、不改写。
+
+### 用图像内容自动核验 A/B 候选
+
+FF++ 文件名 `<target>_<source>` 的官方顺序只是候选提示：抽取帧的索引集合是纯视频长度指纹，在真实视频中高度混淆，不能单独用于核验。本实现因此以图像内容为主要证据，长度/网格信号仅降级为候选提示与时间线兼容性检查，二者不一致时作为一等输出报告，而不是隐藏。
+
+```bash
+python experiments/verify_g21_pairing.py \
+  --dataset-json preprocessing/dataset_json/FaceForensics++.json \
+  --data-root /path/to/FF++/images \
+  --output /path/to/g21_pairing_v1 \
+  --require-usable
+```
+
+第一次务必带 `--require-usable`：不带时即使某方法一个可用配对都没有，进程仍返回 0，只有构建 manifest 时才会以一句难懂的错误暴露出来。`--output` 目录**不允许已存在**（`FileExistsError`），所以每次改阈值重跑都要换一个新目录名，并把 `pair_map.json` 与 `pairing_audit.json` 一起留作 provenance。
+
+**证据必须落在构建器真正会用的帧上。** 每个距离都在"伪造帧与候选帧**原始帧号完全相同**"的交集内测量——`build_ffpp` 把 `same_original_index_verified` 展开成 `[[i, i] …]`，所以只有这个交集能为该断言作证。近似对齐（归一化时间、邻帧替代）一律不用：设计明确禁止断言一个证据并未建立的帧号对应关系。某候选在该帧号没有帧时，该行留空而不是拿邻帧顶替。
+
+只比较排除伪造掩码后的可用背景区域（掩码默认向外膨胀 `--mask-dilation 8` 像素，224 尺度），灰度化、缩放到 224、以 sigma=1 高斯模糊容忍亚像素错位，取平均绝对差。掩码缺失或不可读时回退到中心人脸框并在审计中记录模式；可用像素比例低于 `--eligible-floor`（默认 0.10）的帧记为不可用，不计入平均。
+
+两种判定模式：
+
+- **head_to_head**：两个候选与伪造视频共有 ≥ `--min-verification-frames`（默认 8）个同号帧时，在**同一批帧**上正面比较。要求中位数与去极值均值指向同一候选，且 `--win-rate-min`（默认 0.9）、`--margin-min`（默认 0.5，`r=(d_loser-d_winner)/(d_loser+1e-6)`）与 `d_winner <= --max-winner-distance`（默认 12.0，0..255 尺度）同时满足。绝对上限防止两个候选都很远时 margin 仍显得决定性（例如 d_A=100、d_B=180 仍有 r=0.29）。
+- **single_side_confirmation**：共有帧不足 8 帧时，两侧各自在自己的同号交集上判定。**但两侧仍然共有的那些帧依然具有决定性**：确认侧必须在这些共有帧上不被对方压过（`shared_agreement`）。没有这一条时，只要真正的内容来源恰好可测帧更少，一个"近邻但错误"的场景就会胜出——这是本设计早期版本的真实缺陷。仅当两侧**一帧共有都没有**（真实索引中占 3/2877）时才退化为只按绝对上限判定，因此该上限是 4.0 而不是 12.0。两侧都成立时判 `ambiguous_content` 而不是挑一个。
+
+`margin_ratio` 只在两个候选**测于完全相同的帧集**时才计算：跨不同支撑比中位数会在支撑更大的一侧显得决定性，方向可能是反的。共有帧数记录在 `shared_pairs`，共有帧指向哪一侧记录在 `shared_agreement`（0=A、1=B、-1=平手、null=无共有帧）。
+
+无论哪种模式，**任何决定都不得建立在少于 8 个可测帧之上**：某些帧不可读时，中位数不再是无支撑的噪声，而是直接判 `unusable_frames`，不会把胜利判给证据更少的一方。
+
+最后与内容赢家做时间线 Jaccard 检查（`--timeline-jaccard-min` 默认 0.9）；不匹配的视频以 `timeline_mismatch` 排除，不用邻居/时间规整规则强行对齐。同时记录 `timeline_coverage = |伪造帧 ∩ 赢家帧| / |伪造帧|`，用来区分"真正不相交的时间线"与"网格嵌套、赢家多抽了帧"这两种都被 Jaccard 拒绝的情形。单个条目格式错误（帧号重复、无法解析等）只排除该条目并记录，不会中断整轮扫描；**帧号列表的顺序不参与校验**——FF++ 索引里有 69 个真视频的帧号是有效升序的乱序排列，而帧号是按值寻址的，拒绝它们会白白损失 184/2877（6.4%）个训练键，因此改为接受并在 `frames_out_of_order` 中记录。
+
+输出：
+
+- `pair_map.json`：可直接交给 `build_g21_manifest.py build`。verified 的视频写入逐视频 override；其余写入显式排除标记（`excluded`/`exclude_reason`），构建器据此记录排除并继续，不会静默丢弃方法。
+- `pairing_audit.json`：逐视频记录 key、方法、所选分量、判定模式、d_A/d_B、中位数与去极值均值、win_rate、margin_ratio、可用像素比例、掩码模式、估计长度、两侧同号交集大小、实际测量帧数、是否确认、共有帧数与共有帧指向（`shared_pairs`/`shared_agreement`）、帧号是否为乱序存储、时间线 Jaccard 与 coverage 与判定；并给出 total/verified/ambiguous/weak margin/not closer/timeline mismatch/insufficient intersection/other/usable pairs 漏斗（按方法与总体）。`distributions` 只统计 **verified** 的键：`d_winner_verified`（被接受参考的距离）与 `d_rejected_on_verified`（同一批视频上被否候选的距离）可直接对比，`margin_ratio_verified` 同理；被拒绝的视频不进入任一分布，否则会把"接受的参考"和"否掉的候选"混进同一个直方图。`distinct_references` 给出每方法实际用到的不同参考视频数。`warnings` 给出单条记录看不见的全局征兆：掩码大范围不可用（可能是极性反了）、整个运行没有可读掩码、以及**共有帧为 0 因而只靠绝对上限判定的 verified 键数**。
+
+命令行同时打印上述漏斗、warnings 与分布摘要，便于先看数据再选阈值。`--require-usable` 使任一方法没有任何可用配对、或不同内容来源数低于 `--min-sources`（默认 4，preflight 的 microbatch 要求）时返回非零。相同输入产生逐字节一致的输出，不写入时间戳；任何未 verified 或未通过时间线检查的条目都不会产生配对。
+
+> 阈值仍是未经真实图像校准的保守默认值；**先跑一次，读 `pairing_audit.json` 的 `distributions` 再定阈值**。但在真实 FF++ 索引上先量过判定模式的分布（只读索引，不含图像）：2877 个训练键里 head_to_head 只有 64 个（2.2%），2808 个走 single_side_confirmation（其余 5 个引用的真视频不在训练集索引里）。这 2808 个里，2805 个键两侧仍有 1..7 个共有帧——共有帧规则覆盖 97.5% 的键——只有 3 个键两侧共有帧为 0，即单侧绝对上限真正单独承担判定的只有 3 个键。因此实际强度由共有帧规则与 4.0 上限共同决定，而不是由 head_to_head 决定。
 
 ### 填入 G21 配置
 
@@ -235,7 +290,7 @@ python experiments/run_g21.py aggregate --run-dir /path/to/experiment_results/g2
 
 ## 服务器验收重点
 
-测试文件位于 `tests/g21`，包含：未验证映射拒绝、划分与身份别名、确定性数据计划、同输入不同臂一致、视频分数数值稳定、公共 logit 平移不变、真实/伪造双侧梯度、带 dropout 的两遍/完整图梯度对照、更新边界恢复、日志截断恢复，以及旧 testall 完整性检查。
+测试文件位于 `tests/g21`，包含：未验证映射拒绝、划分与身份别名、确定性数据计划、同输入不同臂一致、视频分数数值稳定、公共 logit 平移不变、真实/伪造双侧梯度、带 dropout 的两遍/完整图梯度对照、更新边界恢复、日志截断恢复、内容配对（同号交集证据、背景距离、掩码回退、不可读帧不得翻转胜负、候选短于抽样窗口不崩溃、共有帧否决单侧确认、共有帧在支撑更大的一侧面前胜出、乱序帧号按值接受且不被位置读错、重复帧号仍拒绝、掩码极性告警、时间线排除、逐字节确定性、CLI 退出码与来源下限），注入真值端到端恢复（合成的 A/B 两侧候选分别经 `pair_map.json` → `build_g21_manifest.py` 落到正确参考来源，并核验审计字段与漏斗分区），以及旧 testall 完整性检查。
 
 建议依次确认：
 
