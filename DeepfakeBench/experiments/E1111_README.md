@@ -9,6 +9,24 @@
 
 两个分支互不依赖，结果目录分别为 experiment_results/E1111/E1111A、experiment_results/E1111/E1111B。每个阶段用新目录，不覆盖历史实验。原 E1025 runner/损失和已有 G21 配对改动保留。
 
+
+## 按原实验方式直接启动
+
+在服务器原环境的 DeepfakeBench 目录中：
+
+    CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111a.py \
+      --base_run ./experiment_results/E0924/seed1024_20260930_110618_353460_2771190 \
+      > nohup_E1111A.log 2>&1 &
+
+    CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111b.py \
+      > nohup_E1111B.log 2>&1 &
+
+A复用已有B0，默认入口自动执行：索引盘点 → 内容配对 → 原视频共享裁剪 → P-D7审计 → 特征提取 → S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认运行CE对照和三个小权重正则配置。
+
+看日志：tail -f nohup_E1111A.log 或 tail -f nohup_E1111B.log。A的all_results.json保存当前阶段和停止原因；每次启动创建独立运行目录。P-D7等科研判据不通过时如实停止，不修改门槛。
+
+严格共享裁剪需要已有的**原始c23视频**。默认按同一数据根目录中的 FaceForensics++/.../c23/videos/视频名.mp4 查找；原视频在其他目录时加 --raw_root /实际根目录。关键点权重优先使用 preprocessing/shape_predictor_81_face_landmarks.dat，兼容 preprocessing/dlib_tools 下的旧路径，也可用 --predictor_path 指定。图片、索引、CLIP路径继承B0配置，仍支持旧实验同名覆盖参数。A在启动时检查这些输入；独立裁剪的PNG不能替代原视频来证明同一裁剪变换。
+
 ## E1111A：预注册执行规则
 
 2026-11-11 在查看实验结果前确定：
@@ -16,7 +34,7 @@
 1. FF++ 官方 train 的719个真实内容源按排序后 seed=1024 打乱，依次分为 fit/rad/sel/beta/theta = 395/72/58/57/137；官方 val 单列开发验证。实际划分保存为 splits.json。
 2. D_sel_FF++ 仅指这58个 FF++ train 源。CDF-v2 real train 的辅助诊断样本不参与 D1、τR、最终λm或配对差估计；CDF-v2 train 作为开发评估源使用。
 3. 每个真实源按数字帧位排序，等距选最多32个不同候选帧；不走旧 loader 的前8帧路径。缺图、坏图、未验证映射单列，禁止复制帧补齐。
-4. 配对需验证真实内容源、原始帧位对应和共同裁剪。A_B 命名只作候选，不自动认定第一个 ID 就是内容源。P-D7 要求 N4≥30、N4≥0.5×395（至少198）、Ncell≥0.9；未通过不进入 S0/S1。
+4. 配对需验证真实内容源、原始帧位对应和共同裁剪。A_B命名只作候选，不自动认定第一个ID就是内容源。共享裁剪从真实原视频帧估计一次仿射M，将原样的M应用到真假原视频帧；沿用原ArcFace模板、scale=1.3、256像素输出，假帧不独立检测或重新估计M。原始画布尺寸不同则排除，不盲目缩放。P-D7 要求 N4≥30、N4≥0.5×395（至少198）、Ncell≥0.9；未通过不进入 S0/S1。
 5. 只用完整四方法源，每格统一 K_pair=min(n_v)。主 B、Dm、五项分解共用清单和权重。审计同时报告 K_pair、有效帧丢弃比例、共同帧丢弃比例、缺失格和剔除原因。
 6. μR/ΣR/Dc/Dtemporal 仍用全部 D_fit 真实源。Dc 的 Q 为所有有效(真实源,候选帧,JPEG质量)组合，质量固定15/30/40/50，每组合等权；提取时遇到新坏图直接失败。
 7. τR∈{0.1,0.3,0.5}：最小化 D_sel_FF++ 真实视频等权的高斯 NLL，使用与后续白化相同的特征值地板；相差≤1e-12时取小τR。
@@ -28,11 +46,12 @@
 
 **统计边界**：划分按内容参考源，不保证 A_B 的两个谱系源均不跨集合；审计保存 cross_split_other_lineage。D1 是方法迁移诊断，不能称为方法×双谱系源独立验证。同一 D_sel 源的不同留出方法共同重采样。S1 对 FF++ val 按 A_B 两个源ID的连通簇共同抽样；CDF-v2 缺原始谱系映射时使用视频代理簇，区间边界随结果记录。
 
-### 服务器步骤
+### 按阶段调试（正常启动无需逐条执行）
 
 在 DeepfakeBench 目录执行。填写已有服务器路径；B0配置使用保存的完整 train_config.json，不要只用 detector YAML。
 
     export DB_DATA_ROOT=/path/to/preprocessed_rgb
+    export DB_RAW_ROOT=/path/to/original_video_root
     export DB_JSON=/path/to/dataset_json
     export DB_CLIP=/path/to/clip-vit-large-patch14
     export DB_B0=/path/to/B0.pth
@@ -49,12 +68,18 @@
       --dataset-json "$DB_JSON/FaceForensics++.json" \
       --data-root "$DB_DATA_ROOT" --output "$E1111_OUT/content_pairing"
 
-原 G21 映射支持方法级 rules 和逐视频 overrides。A支另要求每条生效规则有 crop_alignment_verified=true 和非空字符串 crop_alignment_evidence，记录共同裁剪的预处理依据；源映射 verified/evidence、帧对齐验证仍需保留。只有确有依据时才补裁剪字段，背景内容对应不能自动证明共同裁剪。
+下一步由程序生成共享裁剪及收据，不修改人工验证标志。shared_crop_receipt.json保存真实参考矩阵、真假共同矩阵摘要、原视频/关键点权重摘要和实际生成PNG的SHA；audit逐帧比对该收据及图片字节。仅手填crop_alignment_verified=true或一段说明不再能通过严格同裁剪检查。
 
-    # 使用核验并补齐裁剪依据后的映射文件
-    python experiments/run_e1111a.py audit \
+    python experiments/run_e1111a.py prepare \
       --dataset-json "$DB_JSON/FaceForensics++.json" \
-      --data-root "$DB_DATA_ROOT" --pair-map /path/to/verified_pair_map.json \
+      --pair-map "$E1111_OUT/content_pairing/pair_map.json" \
+      --raw-root "$DB_RAW_ROOT" --output-dir "$E1111_OUT/shared_crop"
+
+    # 自动使用共享裁剪产物与收据
+    python experiments/run_e1111a.py audit \
+      --dataset-json "$E1111_OUT/shared_crop/FaceForensics++.json" \
+      --data-root "$E1111_OUT/shared_crop/images" \
+      --pair-map "$E1111_OUT/shared_crop/pair_map.json" \
       --output-dir "$E1111_OUT/audit"
 
     # 3. 只有 P_D7_pass=true 才继续；失败不降低门槛
@@ -131,39 +156,14 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 
 要保留0.5对照可显式添加 --lams 0 0.01 0.05 0.1 0.5。不要据盲测回调lam。输出配置、源码/索引/权重摘要、选中checkpoint、逐帧NPZ、逐库完整路径video AUC、七库/独立六库均值及失败状态。CDF-v2参与选点，不计入独立六库。
 
-## nohup 后台运行
-
-在服务器原环境的 DeepfakeBench 目录执行；数据、索引和 CLIP 路径沿用前次实验。先运行下节测试，再启动训练。本机不执行这些命令。
-
-    mkdir -p logs
-    E1111_STAMP=$(date +%Y%m%d_%H%M%S)
-    nohup env CUDA_VISIBLE_DEVICES=0 python -u experiments/run_e1111b.py \
-      --prior 0.3 --lams 0 0.01 0.05 0.1 \
-      --dataset_json_folder "$PWD/preprocessing/dataset_json" \
-      --rgb_root /home/user1/effort/data \
-      --clip_pretrained_path "$PWD/training/models--openai--clip-vit-large-patch14" \
-      --output_dir experiment_results/E1111/E1111B \
-      > "logs/E1111B_${E1111_STAMP}.log" 2>&1 < /dev/null &
-    echo "E1111B PID=$!"
-
-A 支是冻结特征统计实验，先后台核验配对，之后按审计门槛继续，不从头训练骨干：
-
-    nohup python -u experiments/verify_g21_pairing.py \
-      --dataset-json "$PWD/preprocessing/dataset_json/FaceForensics++.json" \
-      --data-root /home/user1/effort/data \
-      --output "experiment_results/E1111/E1111A/content_pairing_${E1111_STAMP}" \
-      --require-usable \
-      > "logs/E1111A_pairing_${E1111_STAMP}.log" 2>&1 < /dev/null &
-    echo "E1111A pairing PID=$!"
-
-查看日志：tail -f "logs/E1111B_${E1111_STAMP}.log"。A 的配对工具只负责内容/时间对应，仍需补齐共同裁剪依据后，再执行 audit；不得把工具退出成功视为 P-D7 已通过。
-
 ## 服务器验证
 
 沿用原服务器依赖环境；未增加新的训练框架或第三方依赖。测试已编写，**本机未执行**：
 
-    python -m pytest -q tests/test_e1111a.py tests/test_e1111b.py
+    python -m pytest -q tests/test_e1111a.py tests/test_e1111b.py tests/test_e1111_shared_crop.py
     python -m pytest -q tests/test_e1025_pu.py tests/test_e1025_runner.py \
       tests/test_e1025_integration.py tests/g21/test_builder.py tests/g21/test_pairing.py
 
 第一条覆盖分解恒等式、数据门槛、帧平衡、归一化选参、内外层隔离、Fisher专用秩、零分母、视频分组、CE值/梯度、真实Trainer步与checkpoint重载。第二条检查E1025/G21原路径回归。随后先运行A的inventory/audit，确认实际数据，再决定是否进入后续统计与训练。
+
+新增共享裁剪测试还覆盖：仅在真实帧估计M、真假帧使用完全相同的M、原画布不一致时拒绝、矩阵记录不一致时拒绝、手填bool不能代替生成收据，以及完整runner在P-D7失败时不会加载模型。保留严格同裁剪改变了配对输入的生成方式，历史独立裁剪结果不能直接相减；原B0权重、统计阈值、选参规则和B支训练条件均保持不变。

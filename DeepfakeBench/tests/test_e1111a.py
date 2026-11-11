@@ -149,7 +149,15 @@ def test_audit_uses_complete_sources_equal_frames_and_reports_discarding(tmp_pat
                          "crop_alignment_evidence": "fixture shared transform"}
     data_path, map_path = tmp_path / "data.json", tmp_path / "map.json"
     data_path.write_text(json.dumps({"FaceForensics++": data}))
-    map_path.write_text(json.dumps({"schema_version": 1, "rules": rules}))
+    map_path.write_text(json.dumps({"schema_version": 1, "rules": rules,
+                                   "shared_crop_receipt": "receipt.json",
+                                   "shared_crop_receipt_sha256": "fixture"}))
+    receipt = {"dataset_content_sha256": digest(data), "receipt_sha256": "fixture",
+               "files_sha256": {path: "fixture" for branch in data.values()
+                                 for entry in branch["train"]["c23"].values() for path in entry["frames"]}}
+    monkeypatch.setattr(audit_module, "load_receipt", lambda *args: receipt)
+    monkeypatch.setattr(audit_module, "check_pair", lambda *args: True)
+    monkeypatch.setattr(audit_module, "file_digest", lambda path: "fixture")
     report = audit_module.audit(data_path, tmp_path, map_path, tmp_path / "audit")
     assert report["P_D7_pass"] and report["N4"] == 32 and report["Ncell"] == 1
     assert report["K_pair"] == 2 and len(report["fit_pairs"]) == 32 * 4 * 2
@@ -157,7 +165,7 @@ def test_audit_uses_complete_sources_equal_frames_and_reports_discarding(tmp_pat
     assert load_audit(tmp_path / "audit/audit.json")["audit_sha256"] == report["audit_sha256"]
 
 
-def test_unverified_crop_never_becomes_a_valid_pair(tmp_path, monkeypatch):
+def test_manual_crop_flags_cannot_replace_generated_receipt(tmp_path, monkeypatch):
     ids = [str(i) for i in range(32)]
     monkeypatch.setattr(audit_module, "source_splits",
                         lambda _: {"fit": ids, "sel": [], "theta": [], "rad": [], "beta": []})
@@ -168,13 +176,13 @@ def test_unverified_crop_never_becomes_a_valid_pair(tmp_path, monkeypatch):
         data[method] = {"train": {"c23": {f"{v}_999": {"frames": [f"{method}/{v}/{t}.png" for t in (0, 1)]}
                                              for v in ids}}}
     mapping = {"schema_version": 1, "rules": {m: {"verified": True, "reference_component": 0,
-               "evidence": "source only", "same_original_index_verified": True}
+               "evidence": "source only", "same_original_index_verified": True,
+               "crop_alignment_verified": True, "crop_alignment_evidence": "manual assertion"}
                for m in protocol()["methods"]}}
     (tmp_path / "data.json").write_text(json.dumps({"FaceForensics++": data}))
     (tmp_path / "map.json").write_text(json.dumps(mapping))
-    result = audit_module.audit(tmp_path / "data.json", tmp_path, tmp_path / "map.json", tmp_path / "result")
-    assert not result["P_D7_pass"] and not result["fit_pairs"]
-    assert {x["reason"] for x in result["mapping_exclusions"]} == {"crop_alignment_unverified"}
+    with pytest.raises(ValueError, match="manual flags"):
+        audit_module.audit(tmp_path / "data.json", tmp_path, tmp_path / "map.json", tmp_path / "result")
 
 
 def test_s1_clusters_sources_and_refuses_blind_results(tmp_path, monkeypatch):

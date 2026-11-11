@@ -1,18 +1,27 @@
 {
   "experiment": "E1111",
-  "branches": ["E1111A", "E1111B"],
+  "branches": [
+    "E1111A",
+    "E1111B"
+  ],
   "verification": "static_only",
   "date": "2026-11-11",
-  "python_files_ast_parsed": 14,
-  "ruff_rules": ["E9", "F63", "F7", "F82"],
+  "python_files_ast_parsed": 17,
+  "ruff_rules": [
+    "E9",
+    "F63",
+    "F7",
+    "F82"
+  ],
   "ruff_result": "PASS",
   "diff_whitespace_check": "PASS",
-  "static_mle_review": "completed; blocking findings corrected",
+  "static_mle_review": "completed; shared affine, receipt validation and full runner reviewed; predictor path corrected",
   "runtime_tests_executed": false,
   "data_audit_executed": false,
   "feature_extraction_executed": false,
   "training_executed": false,
   "server_validation": "pending",
   "P_D7": "unknown; actual N4/Ncell/K_pair not audited",
-  "note": "User requested local code and static checks only; all runtime validation remains on the server."
+  "note": "User requested local code and static checks only; all runtime validation remains on the server.",
+  "shared_crop_preparation_executed": false
 }

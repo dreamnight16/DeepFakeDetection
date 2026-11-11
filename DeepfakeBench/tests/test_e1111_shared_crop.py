@@ -1,0 +1,138 @@
+"""Server-only shared-affine preparation and complete-runner contracts."""
+
+import argparse
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "training"))
+
+from e1111 import shared_crop
+from e1111.protocol import protocol
+
+
+@pytest.mark.parametrize("different_geometry", [False, True])
+def test_one_real_affine_is_reused_for_all_fake_crops(tmp_path, monkeypatch, different_geometry):
+    import cv2
+    from e1111.audit import frame_map
+
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    predictor = tmp_path / "predictor.dat"
+    predictor.write_bytes(b"fixture predictor")
+    methods = protocol()["methods"]
+    real_paths = {v: [f"FaceForensics++/original_sequences/youtube/c23/frames/{v}/{i:03d}.png"
+                      for i in (0, 2)] for v in ("001", "002")}
+    data = {"FF-real": {"train": {"c23": {v: {"frames": paths} for v, paths in real_paths.items()}}}}
+    frames_by_video = {}
+    raw = np.arange(48 * 64 * 3, dtype=np.uint8).reshape(48, 64, 3)
+    for source, paths in real_paths.items():
+        frames_by_video[shared_crop.raw_video_path(paths[0])] = {i: raw.copy() for i in (0, 2)}
+    rules = {}
+    for method in methods:
+        paths = [f"FaceForensics++/manipulated_sequences/{method}/c23/frames/001_002/{i:03d}.png"
+                 for i in (0, 2)]
+        data[method] = {"train": {"c23": {"001_002": {"frames": paths}}}}
+        image = np.flip(raw, axis=1).copy()
+        if different_geometry and method == methods[0]:
+            image = image[:-1]
+        frames_by_video[shared_crop.raw_video_path(paths[0])] = {i: image for i in (0, 2)}
+        rules[method] = {"verified": True, "reference_component": 0, "evidence": "fixture",
+                         "same_original_index_verified": True}
+    for relative in frames_by_video:
+        path = raw_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture raw video")
+    matrix = np.array([[.8, 0., 7.], [0., .8, 10.]])
+    estimated_on_real = []
+    monkeypatch.setattr(shared_crop, "landmark_estimator", lambda path: lambda frame: np.zeros((5, 2)))
+
+    def estimate(points):
+        estimated_on_real.append(points)
+        return matrix.copy()
+
+    monkeypatch.setattr(shared_crop, "reference_affine", estimate)
+    monkeypatch.setattr(shared_crop, "video_frames", lambda path, indices: (
+        (i, frames_by_video[str(path.relative_to(raw_root)).replace("\\", "/")][i]) for i in sorted(indices)))
+    dataset_json, pair_map = tmp_path / "dataset.json", tmp_path / "map.json"
+    dataset_json.write_text(json.dumps({"FaceForensics++": data}))
+    pair_map.write_text(json.dumps({"schema_version": 1, "rules": rules}))
+    out = tmp_path / "prepared"
+    result = shared_crop.prepare(dataset_json, pair_map, raw_root, predictor, out)
+    assert len(estimated_on_real) == 4  # two real videos x two frames; never fake detection
+    receipt = shared_crop.load_receipt(out / "shared_crop_receipt.json", out / "images", result["receipt_sha256"])
+    assert len(receipt["pair_warps"]) == (6 if different_geometry else 8)
+    for fake_path, record in receipt["pair_warps"].items():
+        real_path = record["real_path"]
+        assert shared_crop.check_pair(receipt, real_path, fake_path, "001", record["real_frame"], record["fake_frame"])
+        actual_real = cv2.imdecode(np.frombuffer((out / "images" / real_path).read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
+        actual_fake = cv2.imdecode(np.frombuffer((out / "images" / fake_path).read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
+        np.testing.assert_array_equal(actual_real, shared_crop.warp(raw, matrix))
+        expected_fake = frames_by_video[record["raw_video"]][record["fake_frame"]]
+        np.testing.assert_array_equal(actual_fake, shared_crop.warp(expected_fake, matrix))
+    if different_geometry:
+        assert any(row["reason"] == "raw_real_fake_geometry_mismatch" for row in receipt["failures"])
+    first_fake = next(iter(receipt["pair_warps"]))
+    receipt["pair_warps"][first_fake]["matrix_digest"] = "different affine"
+    record = receipt["pair_warps"][first_fake]
+    assert not shared_crop.check_pair(receipt, record["real_path"], first_fake, "001",
+                                      record["real_frame"], record["fake_frame"])
+    assert frame_map(data["FF-real"]["train"]["c23"]["001"])
+
+
+def load_runner(monkeypatch):
+    path = ROOT / "experiments/e1111_runner.py"
+    monkeypatch.syspath_prepend(str(path.parent))
+    spec = importlib.util.spec_from_file_location("e1111_full_runner_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("gate_pass", [False, True])
+def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypatch, gate_pass):
+    from e1111 import audit, features, pipeline
+    from g21 import pairing
+
+    runner = load_runner(monkeypatch)
+    calls = []
+    source = {"checkpoint": "B0.pth", "config_path": "B0.json", "base_sha256": "b0",
+              "config_sha256": "cfg"}
+    inputs = {"source": source, "config": {}, "metadata": tmp_path, "data_root": tmp_path,
+              "raw_root": tmp_path, "clip": tmp_path, "predictor": tmp_path / "predictor.dat",
+              "raw_fake_video_counts": {m: 32 for m in protocol()["methods"]}}
+    monkeypatch.setattr(runner, "resolve_inputs", lambda args: inputs)
+
+    def record(name, result):
+        def run(*args, **kwargs):
+            calls.append(name)
+            return result
+        return run
+
+    monkeypatch.setattr(audit, "inventory", record("inventory", {}))
+    monkeypatch.setattr(pairing, "run_pairing", record("pairing", {}))
+    monkeypatch.setattr(shared_crop, "prepare", record("crop", {
+        "dataset_json": "prepared.json", "images": "images", "pair_map": "prepared_map.json"}))
+    monkeypatch.setattr(audit, "audit", record("audit", {"P_D7_pass": gate_pass,
+                        "status": "P_D7_PASS" if gate_pass else "S0_PAUSED_P_D7"}))
+    monkeypatch.setattr(features, "extract", record("features", {}))
+    monkeypatch.setattr(pipeline, "run_s0", record("s0", {"status": "S0_PASS"}))
+    monkeypatch.setattr(pipeline, "calibrate", record("calibrate", {}))
+    monkeypatch.setattr(features, "export_dataset", record("export", {}))
+    monkeypatch.setattr(pipeline, "score_export", record("score", {}))
+    monkeypatch.setattr(pipeline, "attribution", record("attribution", {"passed": True}))
+    args = argparse.Namespace(output_dir=tmp_path / "run", seed=1024, preflight=False,
+                              pair_map=None, device="cpu", batch_size=8, skip_d8=False)
+    result = runner.run(args)
+    if not gate_pass:
+        assert calls == ["inventory", "pairing", "crop", "audit"]
+        assert result["status"] == "S0_PAUSED_P_D7"
+    else:
+        assert calls == ["inventory", "pairing", "crop", "audit", "features", "s0", "calibrate",
+                         "export", "score", "export", "score", "attribution"]
+        assert result["status"] == "DEVELOPMENT_COMPLETE"

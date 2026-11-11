@@ -6,10 +6,11 @@ from pathlib import Path, PurePosixPath
 import random
 
 from g21.data import uniform_indices
-from g21.io import atomic_json
+from g21.io import atomic_json, file_digest
 from g21.manifest import image_path, relative_path
 
 from .protocol import digest, implementation_digest, protocol
+from .shared_crop import check_pair, load_receipt
 
 
 def frame_map(entry):
@@ -80,16 +81,25 @@ def audit(dataset_json, data_root, pair_map, output):
     mapping = json.loads(Path(pair_map).read_text(encoding="utf-8-sig"))
     if mapping.get("schema_version") != 1:
         raise ValueError("Unsupported pair-map schema")
+    if not mapping.get("shared_crop_receipt"):
+        raise ValueError("Strict same-crop evidence is absent: generate shared crops from original videos; manual flags do not establish it")
+    receipt = load_receipt(image_path(Path(pair_map).parent, mapping["shared_crop_receipt"]),
+                           data_root, mapping.get("shared_crop_receipt_sha256"))
+    if receipt["dataset_content_sha256"] != digest(data):
+        raise ValueError("Shared crops and dataset metadata differ")
     settings = protocol()
     reals = data["FF-real"]["train"]["c23"]
     splits = source_splits(reals)
     source_split = {source: split for split, sources in splits.items() for source in sources}
     selected_real, checked = {}, {}
     invalid_paths = []
+    crop_rejections = []
 
     def readable(path):
         if path not in checked:
-            checked[path] = _valid_image(data_root, path)
+            expected = receipt["files_sha256"].get(path)
+            checked[path] = bool(expected and _valid_image(data_root, path)
+                                 and file_digest(image_path(data_root, path)) == expected)
             if not checked[path]:
                 invalid_paths.append(path)
         return checked[path]
@@ -116,10 +126,6 @@ def audit(dataset_json, data_root, pair_map, output):
                   or type(rule.get("reference_component")) is not int
                   or rule["reference_component"] not in (0, 1) or len(ids) != 2):
                 reason = "source_mapping_unverified"
-            elif (rule.get("crop_alignment_verified") is not True
-                  or not isinstance(rule.get("crop_alignment_evidence"), str)
-                  or not rule["crop_alignment_evidence"].strip()):
-                reason = "crop_alignment_unverified"
             if reason:
                 exclusions.append({"method": method, "video": key, "reason": reason})
                 continue
@@ -151,6 +157,11 @@ def audit(dataset_json, data_root, pair_map, output):
             frames = {}
             for real_index, fake_index in matches:
                 if real_index in selected_real[source] and fake_index in fake and readable(fake[fake_index]):
+                    if not check_pair(receipt, selected_real[source][real_index], fake[fake_index],
+                                      source, real_index, fake_index):
+                        crop_rejections.append({"method": method, "video": key,
+                                                "real_frame": real_index, "fake_frame": fake_index})
+                        continue
                     frames[real_index] = {
                         "source": source, "split": source_split[source], "method": method,
                         "frame": real_index, "real_path": selected_real[source][real_index],
@@ -195,6 +206,8 @@ def audit(dataset_json, data_root, pair_map, output):
         "n_vm": counts, "n_v": {v: len(common[v]) for v in fit},
         "complete_sources": complete, "discarded_sources": sorted(set(fit) - set(complete)),
         "invalid_paths": invalid_paths, "mapping_exclusions": exclusions, "ambiguous_cells": ambiguous,
+        "shared_crop_receipt_sha256": receipt["receipt_sha256"],
+        "crop_frame_rejections": crop_rejections,
         "missing_cells_by_method": {m: sum(counts[v][m] == 0 for v in fit) for m in methods},
         "discarded_valid_pair_fraction": None if not total_valid else 1 - retained / total_valid,
         "discarded_common_pair_fraction": None if not complete_common else 1 - retained / complete_common,

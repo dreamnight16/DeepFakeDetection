@@ -1,4 +1,4 @@
-"""E1111A: inventory -> strict pairing audit -> global features -> gated S0."""
+"""E1111A complete frozen-B0 experiment, with optional individual stage commands."""
 
 import argparse
 import json
@@ -13,7 +13,25 @@ from e1111.protocol import protocol
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    predictor_candidates = [ROOT / "preprocessing/shape_predictor_81_face_landmarks.dat",
+                            ROOT / "preprocessing/dlib_tools/shape_predictor_81_face_landmarks.dat"]
+    default_predictor = next((p for p in predictor_candidates if p.is_file()), predictor_candidates[0])
     parser.add_argument("--dry-run", "--dry_run", action="store_true")
+    parser.add_argument("--base_run", type=Path)
+    parser.add_argument("--base_checkpoint", type=Path)
+    parser.add_argument("--base_config", type=Path)
+    parser.add_argument("--dataset_json_folder", type=Path)
+    parser.add_argument("--rgb_root", type=Path)
+    parser.add_argument("--raw_root", type=Path)
+    parser.add_argument("--clip_pretrained_path", type=Path)
+    parser.add_argument("--predictor_path", type=Path, default=default_predictor)
+    parser.add_argument("--pair_map", type=Path)
+    parser.add_argument("--output_dir", type=Path, default=ROOT / "experiment_results/E1111/E1111A")
+    parser.add_argument("--seed", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--skip_d8", action="store_true")
+    parser.add_argument("--preflight", action="store_true")
     stages = parser.add_subparsers(dest="stage")
     for name in ("inventory", "audit"):
         child = stages.add_parser(name)
@@ -56,16 +74,25 @@ def build_parser():
     child = stages.add_parser("attribution")
     child.add_argument("--evaluations", nargs="+", type=Path, required=True)
     child.add_argument("--output-dir", type=Path, required=True)
+    child = stages.add_parser("prepare")
+    child.add_argument("--dataset-json", type=Path, default=ROOT / "preprocessing/dataset_json/FaceForensics++.json")
+    child.add_argument("--pair-map", type=Path, required=True)
+    child.add_argument("--raw-root", type=Path, required=True)
+    child.add_argument("--predictor-path", type=Path, default=default_predictor)
+    child.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.dry_run or args.stage is None:
+    if args.dry_run:
         print(json.dumps(protocol(), ensure_ascii=False, indent=2))
         return 0
     try:
-        if args.stage == "inventory":
+        if args.stage is None:
+            from e1111_runner import run
+            result = run(args)
+        elif args.stage == "inventory":
             from e1111.audit import inventory
             result = inventory(args.dataset_json, args.output_dir)
         elif args.stage == "audit":
@@ -97,13 +124,17 @@ def main(argv=None):
                                     args.base_config, args.checkpoint, args.clip_pretrained_path,
                                     args.output_dir / "features.npz",
                                     device=args.device, batch_size=args.batch_size)
-        else:
+        elif args.stage == "attribution":
             from e1111.pipeline import attribution
             result = attribution(args.evaluations, args.output_dir)
+        else:
+            from e1111.shared_crop import prepare
+            result = prepare(args.dataset_json, args.pair_map, args.raw_root, args.predictor_path, args.output_dir)
         summary = {key: result[key] for key in ("status", "N4", "Ncell", "K_pair", "gamma") if key in result}
-        print(json.dumps({"output": str(args.output_dir), **summary}, ensure_ascii=False))
+        print(json.dumps({"output": result.get("results_dir", str(args.output_dir)), **summary}, ensure_ascii=False))
         return 0 if result.get("passed", True) and result.get("status") not in (
-            "S0_STOPPED", "S0_PAUSED_P_D7", "S0_PAUSED_UNREADABLE_REAL", "D1_FAILED_REGULARIZATION_ONLY") else 2
+            "FAILED", "S1_FAILED", "S0_STOPPED", "S0_PAUSED_P_D7",
+            "S0_PAUSED_UNREADABLE_REAL", "D1_FAILED_REGULARIZATION_ONLY") else 2
     except (ValueError, OSError, KeyError) as exc:
         print(f"E1111A stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
