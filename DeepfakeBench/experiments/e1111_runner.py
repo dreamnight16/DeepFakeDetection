@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+from e1111_paths import normalize_arguments, relocated
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_RUN = ROOT / "experiment_results/E0924/seed1024_20260930_110618_353460_2771190"
@@ -14,8 +15,10 @@ DEFAULT_BASE_RUN = ROOT / "experiment_results/E0924/seed1024_20260930_110618_353
 def resolve_source(args):
     import run_e1001 as previous
 
-    source_args = argparse.Namespace(base_run=args.base_run, base_checkpoint=args.base_checkpoint,
-                                    base_config=args.base_config)
+    source_args = argparse.Namespace(
+        base_run=Path(relocated(args.base_run)) if args.base_run else None,
+        base_checkpoint=Path(relocated(args.base_checkpoint)) if args.base_checkpoint else None,
+        base_config=Path(relocated(args.base_config)) if args.base_config else None)
     if not any((source_args.base_run, source_args.base_checkpoint, source_args.base_config)):
         source_args.base_run = DEFAULT_BASE_RUN
     if source_args.base_run and (source_args.base_checkpoint or source_args.base_config):
@@ -28,13 +31,29 @@ def resolve_source(args):
             baseline = report.get("arms", {}).get("B0", {})
             if baseline.get("status") != "OK" or baseline.get("settings", {}).get("model_name") != "effort":
                 raise ValueError("The source E1111 B0 must be a successful original-CE run")
-            source_args = argparse.Namespace(base_run=None, base_checkpoint=Path(baseline["ckpt"]),
+            source_args = argparse.Namespace(base_run=None, base_checkpoint=Path(relocated(baseline["ckpt"])),
                                             base_config=run_path / "B0/train_config.json")
             source = previous.resolve_source(source_args)
             if source["base_sha256"] != baseline.get("checkpoint_sha256"):
                 raise ValueError("Retrained B0 checkpoint hash differs from its result")
             source["origin"] = "E1111B/B0: independently retrained original CE"
             return source
+    if run_path:
+        # The existing E0924 --base_run convention can also be moved intact.
+        folder = run_path / "training/G26_B0"
+        pointer = run_path / "training_results.json"
+        result_path = folder / "result.json"
+        result = json.loads(pointer.read_text(encoding="utf-8-sig")).get("G26_B0") if pointer.is_file() else None
+        if result is None and result_path.is_file():
+            result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        if result is not None:
+            if result.get("status") != "OK" or not result.get("ckpt"):
+                raise ValueError("The source E0924 B0 must have a successful checkpoint")
+            if result.get("artifact_dir"):
+                folder = Path(relocated(result["artifact_dir"]))
+            source_args = argparse.Namespace(base_run=None,
+                                            base_checkpoint=Path(relocated(result["ckpt"])),
+                                            base_config=folder / "train_config.json")
     return previous.resolve_source(source_args)
 
 
@@ -49,6 +68,7 @@ def resolve_inputs(args):
         raise ValueError("This frozen E1111A protocol uses seed=1024")
     source = resolve_source(args)
     config = copy.deepcopy(source["config"])
+    normalize_arguments(args, ROOT, config)
     labels = yaml.safe_load((ROOT / "training/config/test_config.yaml").read_text(encoding="utf-8"))["label_dict"]
     for name, value in labels.items():
         if name in config["label_dict"] and (config["label_dict"][name] != 0) != (value != 0):

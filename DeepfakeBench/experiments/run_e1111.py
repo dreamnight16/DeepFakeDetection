@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 
+from e1111_paths import normalize_arguments, relocated
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -121,14 +123,14 @@ def owning_default(relative_file, key, manifest):
 
 
 def validate_base_run(path, args):
-    path = Path(path).resolve()
+    path = Path(relocated(path)).resolve()
     report = json.loads((path / "all_results.json").read_text(encoding="utf-8-sig"))
     baseline = report.get("arms", {}).get("B0", {})
     if (report.get("experiment") != "E1111" or report.get("branch") != "E1111B"
             or baseline.get("status") != "OK"
             or baseline.get("settings") != {"model_name": "effort"}):
         raise ValueError("base_run must contain a successful original E1111 B0, not CE_L0/PUCE")
-    checkpoint = Path(baseline["ckpt"])
+    checkpoint = Path(relocated(baseline["ckpt"]))
     config = json.loads((path / "B0/train_config.json").read_text(encoding="utf-8-sig"))
     expected = {"model_name": "effort", "manualSeed": args.seed, "nEpochs": args.n_epochs,
                 "train_batchSize": args.batch_size, "sampler_real_ratio": args.sampler_real_ratio,
@@ -139,7 +141,7 @@ def validate_base_run(path, args):
     if file_sha256(checkpoint) != baseline.get("checkpoint_sha256"):
         raise ValueError("B0 checkpoint SHA does not match its result")
     manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8-sig"))
-    metadata = Path(args.dataset_json_folder or config["dataset_json_folder"]).resolve()
+    metadata = Path(relocated(args.dataset_json_folder or config["dataset_json_folder"])).resolve()
     data_hashes = manifest.get("dataset_sha256", {})
     if "FaceForensics++" not in data_hashes:
         raise ValueError("B0 manifest has no FF++ dataset identity")
@@ -152,9 +154,9 @@ def validate_base_run(path, args):
         ("clip_pretrained_path", "clip_pretrained_path", "training/detectors/effort_detector.py"),
     ):
         original = config.get(config_key) or owning_default(owner, config_key, manifest)
-        original = Path(original).resolve()
+        original = Path(relocated(original)).resolve()
         supplied = getattr(args, argument)
-        if supplied is not None and Path(supplied).resolve() != original:
+        if supplied is not None and Path(relocated(supplied)).resolve() != original:
             raise ValueError(f"Requested {argument} differs from B0; use its original path or retrain B0")
         if not original.is_dir():
             raise FileNotFoundError(f"B0 {argument} is absent: {original}")
@@ -336,6 +338,13 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     validate_arguments(parser, args)
+    # On a reused B0, retain its effective paths until validate_base_run can
+    # verify and relocate them. Fresh runs use the current project/data roots.
+    if not args.base_run:
+        normalize_arguments(args, ROOT)
+    else:
+        args.base_run = Path(relocated(args.base_run))
+        args.output_dir = Path(relocated(args.output_dir))
     if args.dry_run:
         print(json.dumps(plan(args), ensure_ascii=False, indent=2))
         return 0

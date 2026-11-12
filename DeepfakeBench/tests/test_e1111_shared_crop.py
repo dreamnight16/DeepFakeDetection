@@ -163,3 +163,26 @@ def test_a_accepts_successful_native_e1111_b0_without_using_the_old_checkpoint(t
     (tmp_path / "all_results.json").write_text(json.dumps(report))
     with pytest.raises(ValueError, match="original-CE"):
         runner.resolve_source(args)
+
+
+def test_legacy_e0924_embedded_paths_follow_the_same_relocation(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import e1111_paths
+
+    runner = load_runner(monkeypatch)
+    moved = tmp_path / "moved"
+    monkeypatch.setattr(e1111_paths, "NEW_ROOT", str(moved))
+    run = moved / "effort/old_run"
+    run.mkdir(parents=True)
+    (run / "training_results.json").write_text(json.dumps({"G26_B0": {
+        "status": "OK", "ckpt": "/home/user1/effort/weights/B0.pth",
+        "artifact_dir": "/home/user1/effort/artifact"}}))
+    seen = []
+    monkeypatch.setitem(sys.modules, "run_e1001", SimpleNamespace(
+        resolve_source=lambda args: seen.append(args) or {"config": {"model_name": "effort"}}))
+    args = argparse.Namespace(base_run=Path("/home/user1/effort/old_run"),
+                              base_checkpoint=None, base_config=None)
+    runner.resolve_source(args)
+    assert seen[0].base_run is None
+    assert seen[0].base_checkpoint == moved / "effort/weights/B0.pth"
+    assert seen[0].base_config == moved / "effort/artifact/train_config.json"

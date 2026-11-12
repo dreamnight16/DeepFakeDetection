@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 import run_e1025 as previous
+from e1111_paths import input_file, normalize_arguments
 
 
 ROOT = previous.ROOT
@@ -73,9 +74,44 @@ def plan(args):
 
 
 def build_arm_config(args, arm, folder, build_config, for_training):
+    normalize_arguments(args, ROOT)
     config = BASE.build_arm_config(args, "B0", folder, build_config, for_training)
     config.update(arm_settings(args)[arm])
     return config
+
+
+def check_input_files(training, evaluation, utilities):
+    """Check the actual legacy sampled lists; never call __getitem__ or replace a sample."""
+    seen, counts = set(), {}
+
+    def check(loader, tag, config):
+        dataset = loader.dataset
+        try:
+            if config.get("lmdb", False):
+                raise ValueError("E1111 file preflight expects the original RGB-file protocol")
+            root = Path(config["rgb_root_override"])
+            if not root.is_dir():
+                raise FileNotFoundError(f"RGB root is missing: {root}")
+            for raw in dataset.image_list:
+                if not isinstance(raw, str):
+                    raise ValueError("Original B0 expects single-frame image paths")
+                path = input_file(raw, root)
+                if path not in seen:
+                    if not path.is_file():
+                        raise FileNotFoundError(
+                            f"{tag}: sampled image is missing: {path}. "
+                            "Check the relocated data root first; only rerun preprocessing if this new path is genuinely absent.")
+                    seen.add(path)
+            counts[tag] = len(dataset.image_list)
+        finally:
+            environment = getattr(dataset, "env", None)
+            if environment is not None:
+                environment.close()
+
+    check(utilities.get_train_loader(training), "FF++ train", training)
+    for dataset in previous.TEST_DS:
+        check(utilities.get_data_loader(evaluation, dataset), f"{dataset} test", evaluation)
+    return {"sample_counts": counts, "unique_files_checked": len(seen)}
 
 
 def run_one(args, arm, folder, utilities):
@@ -145,6 +181,7 @@ def main(argv=None):
         revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
                                   text=True, check=False)
         sources = ["experiments/run_e1111b.py", "experiments/run_e1025.py",
+                   "experiments/e1111_paths.py",
                    "experiments/run_e1021.py", "experiments/run_g25.py",
                    "experiments/experiment_utils.py", "experiments/e0924_export.py",
                    "experiments/run_e1001.py", "training/detectors/effort_detector.py",
@@ -163,6 +200,9 @@ def main(argv=None):
         manifest["dataset_sha256"] = {
             dataset: hashlib.sha256((metadata / f"{dataset}.json").read_bytes()).hexdigest()
             for dataset in previous.TEST_DS}
+        evaluation_preview = build_arm_config(args, first, output / first, utilities.build_config, False)
+        print(f"E1111 input preflight: RGB={preview['rgb_root_override']}, CLIP={preview['clip_pretrained_path']}", flush=True)
+        manifest["input_files_preflight"] = check_input_files(preview, evaluation_preview, utilities)
         BASE.baseline.write_json(output / "manifest.json", manifest)
         for arm in results["arms"]:
             print(f"E1111B/{arm}: {arm_settings(args)[arm]}", flush=True)

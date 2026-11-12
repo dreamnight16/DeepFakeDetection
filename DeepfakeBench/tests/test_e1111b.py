@@ -167,6 +167,8 @@ def test_native_b0_config_is_exactly_the_existing_e1025_baseline(monkeypatch, tm
     runner.validate_arguments(parser, args)
     assert runner.arm_settings(args) == {"B0": {"model_name": "effort"}}
     assert runner.plan(args)["arm_objectives"] == {"B0": "original batch CE"}
+    # Compare the identical original training protocol at the same relocated paths.
+    runner.normalize_arguments(args, runner.ROOT)
     old_args = argparse.Namespace(**{**vars(args), "arms": ["B0"]})
     for training in (True, False):
         actual = runner.build_arm_config(args, "B0", tmp_path, config_builder(), training)

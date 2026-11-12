@@ -10,6 +10,28 @@
 两个分支互不依赖，结果目录分别为 experiment_results/E1111/E1111A、experiment_results/E1111/E1111B。每个阶段用新目录，不覆盖历史实验。原 E1025 runner/损失和已有 G21 配对改动保留。
 
 
+## 搬迁到 /mnt/data2 后的路径
+
+当前迁移仅将 /home/user1 前缀替换为 /mnt/data2，其余相对目录保持不变。E1111默认图片根目录为 /mnt/data2/effort/data；索引默认取当前DeepfakeBench/preprocessing/dataset_json，CLIP取当前DeepfakeBench/training/models--openai--clip-vit-large-patch14。也支持同名CLI参数显式覆盖；旧B0结果中的checkpoint、数据目录及E0924的artifact_dir会按同一前缀规则读取新位置，不修改原结果文件。
+
+在搬迁后的DeepfakeBench目录执行：
+
+    nohup python -u experiments/run_e1111.py --gpu_a 0 --gpu_b 1 \
+      --rgb_root /mnt/data2/effort/data \
+      --dataset_json_folder "$PWD/preprocessing/dataset_json" \
+      --clip_pretrained_path "$PWD/training/models--openai--clip-vit-large-patch14" \
+      > nohup_E1111.log 2>&1 &
+
+B0训练前会构造与原管线相同的Dataset，只读取其实际采样清单，检查训练及评估文件是否存在；不迭代loader、不调用getitem、不解码图片、不改变清单、采样或增强。错误根目录或缺失文件会在训练前停止，避免旧loader的随机换样本分支掩盖路径错误。这个预检不等于图片解码完整性审计。
+
+先检查日志里报错样本的新位置是否存在。例如：
+
+    ls /mnt/data2/effort/data/FaceForensics++/original_sequences/youtube/c23/frames/113/081.png
+
+若存在，只需修正读取根目录，无须重跑preprocess；若不存在，再检查预处理输出是否搬全、索引是否与本次抽帧/人脸检测输出匹配。只有实际缺少预处理产物时才补跑对应数据，不因旧路径报错直接重做全部预处理。索引若仍包含/home/user1的绝对路径，预检会单独提示更新索引前缀，不把它误判为缺少原始图片。
+
+已经出现缺图随机替代的错误训练应停止，修复后启动新run；不要把该run的checkpoint当成原版B0对照继续使用。
+
 ## 一条命令运行全部实验
 
 在原服务器环境、DeepfakeBench目录中，使用总入口 run_e1111.py：
@@ -202,7 +224,7 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 
 沿用原服务器依赖环境；未增加新的训练框架或第三方依赖。测试已编写，**本机未执行**：
 
-    python -m pytest -q tests/test_e1111a.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py
+    python -m pytest -q tests/test_e1111a.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py tests/test_e1111_paths.py
     python -m pytest -q tests/test_e1025_pu.py tests/test_e1025_runner.py \
       tests/test_e1025_integration.py tests/g21/test_builder.py tests/g21/test_pairing.py
 

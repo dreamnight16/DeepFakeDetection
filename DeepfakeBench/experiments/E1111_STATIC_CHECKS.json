@@ -6,7 +6,7 @@
   ],
   "verification": "static_only",
   "date": "2026-11-12",
-  "python_files_ast_parsed": 19,
+  "python_files_ast_parsed": 21,
   "ruff_rules": [
     "E9",
     "F63",
@@ -15,7 +15,7 @@
   ],
   "ruff_result": "PASS",
   "diff_whitespace_check": "PASS",
-  "static_mle_review": "approved launcher sequencing, common native B0, inherited paths, GPU isolation and process-group cleanup; runtime tests not executed",
+  "static_mle_review": "reviewed relocated paths and sampled-file preflight; old E0924 embedded source paths corrected; runtime tests not executed",
   "runtime_tests_executed": false,
   "data_audit_executed": false,
   "feature_extraction_executed": false,
@@ -25,7 +25,10 @@
   "note": "User requested local code and static checks only; all runtime validation remains on the server.",
   "shared_crop_preparation_executed": false,
   "native_B0": "original effort + original batch CE; independently initialized from CLIP; same E1025 training and 8/8-frame evaluation",
-  "last_change_ast_files_parsed": 2,
+  "last_change_ast_files_parsed": 7,
   "all_in_one_launcher": "one native B0; same-card sequential / two-card parallel A and PUCE; optional verified B0 reuse",
-  "launcher_runtime_tests_executed": false
+  "launcher_runtime_tests_executed": false,
+  "path_relocation": "/home/user1 -> /mnt/data2; model/statistical conditions unchanged",
+  "sampled_input_preflight": "actual legacy sampled file lists; existence only; no getitem/decode/substitution",
+  "preprocessing_executed": false
 }
