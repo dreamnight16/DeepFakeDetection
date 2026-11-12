@@ -10,6 +10,35 @@
 两个分支互不依赖，结果目录分别为 experiment_results/E1111/E1111A、experiment_results/E1111/E1111B。每个阶段用新目录，不覆盖历史实验。原 E1025 runner/损失和已有 G21 配对改动保留。
 
 
+## 一条命令运行全部实验
+
+在原服务器环境、DeepfakeBench目录中，使用总入口 run_e1111.py：
+
+    # 一张卡：原版B0 → A → B，串行执行
+    nohup python -u experiments/run_e1111.py --gpu_a 0 --gpu_b 0 \
+      > nohup_E1111.log 2>&1 &
+
+    # 两张卡：先在GPU1重训一次原版B0；完成后A用GPU0、B用GPU1并行
+    nohup python -u experiments/run_e1111.py --gpu_a 0 --gpu_b 1 \
+      > nohup_E1111.log 2>&1 &
+
+以上两条选一条执行，不要同时提交。--gpu_a/--gpu_b为物理CUDA卡号，总入口会覆盖继承的CUDA_VISIBLE_DEVICES，为每个子进程单独指定卡；因此无需在命令外再设置单卡掩码。每个子进程的LOCAL_RANK固定0、WORLD_SIZE固定1，A子进程内使用逻辑cuda:0。
+
+如果已经完成了前面的新B0训练，传入那次包含all_results.json的运行目录即可复用，不再重训：
+
+    nohup python -u experiments/run_e1111.py --gpu_a 0 --gpu_b 1 \
+      --base_run ./experiment_results/E1111/E1111B/seed1024_已完成的运行目录 \
+      > nohup_E1111.log 2>&1 &
+
+总入口只接收成功的原版effort+CE B0，校验checkpoint SHA及种子、epoch、batch、real ratio、c23和8/8帧设置。B阶段固定传--arms PUCE，只运行CE_L0和三个小权重配置，原版B0只训练一次；A明确传入该次B0目录，不会自动回到历史E0924权重。需要覆盖epoch、batch或数据路径时，在总入口传同名训练参数，同时用于新B0和B；复用B0时若训练条件不一致会在启动前报出差异。两个分支同时继承B0的实际索引目录、RGB根目录及CLIP路径；索引逐文件SHA与B0 manifest核对，RGB/CLIP覆盖与B0不一致时拒绝，避免两支使用不同数据或预训练源。旧配置省略的默认路径仅在原加载代码SHA一致时从其源码读取，不加载模型。
+
+原视频根目录可加 --raw_root，关键点权重可加 --predictor_path；其他数据/CLIP参数沿用现有入口。未改变A严格共享裁剪、P-D7或B的模型、损失、训练和选点规则。总入口仅执行服务器开发实验，不自动启动正式盲测。
+
+总输出目录为 experiment_results/E1111/all/seed1024_本次时间戳/，包含B0.log、A.log、B.log和总all_results.json；每个分支保留自己的完整结果目录。看总调度日志用 tail -f nohup_E1111.log，具体训练日志路径在启动时打印。A因数据门槛或统计判据停止时，B仍继续；B0失败时两支均不启动。停止总进程时会终止其正在运行的子进程组。
+
+    # 仅在服务器检查调度计划，不加载模型
+    python experiments/run_e1111.py --gpu_a 0 --gpu_b 1 --dry_run
+
 ## 按原实验方式直接启动
 
 在服务器原环境的 DeepfakeBench 目录中。**只重新训练最基础B0对照**：
@@ -19,7 +48,7 @@
 
 这组使用原 effort 检测器：CLIP ViT-L/14、原单LoRA rank4、CLS/pooler原二分类头、整批平均CE。从CLIP预训练重新初始化，不加载历史detector checkpoint。沿用E1025 B0的FF++ c23、8/8帧、batch32、real ratio0.3、seed1024、Adam lr2e-4/wd5e-4、原增强和CDF-v2 frame-AUC选点。结果同时保留完整路径和历史basename的视频AUC口径；它是独立原版B0，不用新损失的CE_L0替代。
 
-同时运行新B0和PUCE四组时，直接使用默认命令（共五组）：
+需要手动分别启动时，以下A使用已指定的B0，B默认运行新B0和PUCE四组（共五组）；共用新B0并自动分卡优先使用上面的总入口：
 
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111a.py \
       --base_run ./experiment_results/E0924/seed1024_20260930_110618_353460_2771190 \
@@ -173,10 +202,12 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 
 沿用原服务器依赖环境；未增加新的训练框架或第三方依赖。测试已编写，**本机未执行**：
 
-    python -m pytest -q tests/test_e1111a.py tests/test_e1111b.py tests/test_e1111_shared_crop.py
+    python -m pytest -q tests/test_e1111a.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py
     python -m pytest -q tests/test_e1025_pu.py tests/test_e1025_runner.py \
       tests/test_e1025_integration.py tests/g21/test_builder.py tests/g21/test_pairing.py
 
 第一条覆盖分解恒等式、数据门槛、帧平衡、归一化选参、内外层隔离、Fisher专用秩、零分母、视频分组、CE值/梯度、真实Trainer步与checkpoint重载。第二条检查E1025/G21原路径回归。随后先运行A的inventory/audit，确认实际数据，再决定是否进入后续统计与训练。
 
 新增共享裁剪测试还覆盖：仅在真实帧估计M、真假帧使用完全相同的M、原画布不一致时拒绝、矩阵记录不一致时拒绝、手填bool不能代替生成收据，以及完整runner在P-D7失败时不会加载模型。保留严格同裁剪改变了配对输入的生成方式，历史独立裁剪结果不能直接相减；原B0权重、统计阈值、选参规则和B支训练条件均保持不变。
+
+总调度器测试通过模拟子进程检查一次原版B0、同卡串行/异卡并行、CUDA设备隔离、复用基线、A停止后B继续、缺失结果拒绝成功和中断清理。本机未执行这些运行测试。
