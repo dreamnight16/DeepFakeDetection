@@ -22,9 +22,7 @@ def build_parser():
     parser.add_argument("--base_config", type=Path)
     parser.add_argument("--dataset_json_folder", type=Path)
     parser.add_argument("--rgb_root", type=Path)
-    parser.add_argument("--raw_root", type=Path)
     parser.add_argument("--clip_pretrained_path", type=Path)
-    parser.add_argument("--predictor_path", type=Path, default=default_predictor)
     parser.add_argument("--pair_map", type=Path)
     parser.add_argument("--output_dir", type=Path, default=ROOT / "experiment_results/E1111/E1111A")
     parser.add_argument("--seed", type=int, default=1024)
@@ -37,6 +35,8 @@ def build_parser():
         child = stages.add_parser(name)
         child.add_argument("--dataset-json", type=Path, default=ROOT / "preprocessing/dataset_json/FaceForensics++.json")
         child.add_argument("--output-dir", type=Path, required=True)
+        if name == "inventory":
+            child.add_argument("--data-root", type=Path, help="Use the same crop files via a normalized index view")
         if name == "audit":
             child.add_argument("--data-root", type=Path, required=True)
             child.add_argument("--pair-map", type=Path, required=True)
@@ -74,7 +74,7 @@ def build_parser():
     child = stages.add_parser("attribution")
     child.add_argument("--evaluations", nargs="+", type=Path, required=True)
     child.add_argument("--output-dir", type=Path, required=True)
-    child = stages.add_parser("prepare")
+    child = stages.add_parser("prepare", help="Legacy shared-crop experiment, not part of the normal A run")
     child.add_argument("--dataset-json", type=Path, default=ROOT / "preprocessing/dataset_json/FaceForensics++.json")
     child.add_argument("--pair-map", type=Path, required=True)
     child.add_argument("--raw-root", type=Path, required=True)
@@ -94,7 +94,7 @@ def main(argv=None):
             result = run(args)
         elif args.stage == "inventory":
             from e1111.audit import inventory
-            result = inventory(args.dataset_json, args.output_dir)
+            result = inventory(args.dataset_json, args.output_dir, data_root=args.data_root)
         elif args.stage == "audit":
             from e1111.audit import audit
             result = audit(args.dataset_json, args.data_root, args.pair_map, args.output_dir)

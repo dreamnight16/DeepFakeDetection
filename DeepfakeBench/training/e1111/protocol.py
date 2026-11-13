@@ -31,7 +31,8 @@ def protocol():
         "P_D7": {"min_complete_sources": 30, "min_complete_fraction": .5,
                  "min_cell_coverage": .9, "unverified": "stop before S0/S1"},
         "K_pair": "minimum common valid frame count over all complete sources; never tuned",
-        "shared_crop": "raw c23 frames; one real-reference affine applied unchanged to real and fake; 256px ArcFace template scale 1.3",
+        "input_preprocessing": "same existing DeepfakeBench face-crop files as B0/B; no raw video or recropping",
+        "crop_scope": "independent per-frame alignment; paired moments may include crop nuisance",
         "execution": "local source/static checks only; all data/model execution on server",
     }
 
@@ -45,7 +46,6 @@ def implementation_digest(stage):
     root = Path(__file__).resolve().parents[2]
     groups = {
         "audit": ["training/e1111/audit.py", "training/e1111/protocol.py",
-                  "training/e1111/shared_crop.py",
                   "training/g21/data.py", "training/g21/manifest.py", "training/g21/io.py"],
         "feature": ["training/e1111/features.py", "training/detectors/effort_detector.py",
                     "training/g21/data.py", "training/g21/manifest.py"],

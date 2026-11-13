@@ -4,10 +4,10 @@
 
 | 分支 | 基础 | 本轮改变 |
 |---|---|---|
-| E1111A | v4.4.3、冻结 B0 | 严格配对审计、平衡统计、逐折嵌套选参、后验度量与归因对照 |
+| E1111A | v4.4.3、冻结 B0 | 同源同帧配对、平衡统计、逐折嵌套选参、后验度量与归因对照 |
 | E1111B | E1025 单 LoRA B0/PU | 保留整批 CE，增加可缩小到零的非负 PU 风险正则 |
 
-两个分支互不依赖，结果目录分别为 experiment_results/E1111/E1111A、experiment_results/E1111/E1111B。每个阶段用新目录，不覆盖历史实验。原 E1025 runner/损失和已有 G21 配对改动保留。
+A、B共用原有DeepfakeBench预处理图片，原版B0作为共同对照；结果目录分别为 experiment_results/E1111/E1111A、experiment_results/E1111/E1111B。每个阶段用新目录，不覆盖历史实验。原 E1025 runner/损失和已有 G21 配对改动保留。
 
 
 ## 搬迁到 /mnt/data2 后的路径
@@ -54,7 +54,7 @@ B0训练前会构造与原管线相同的Dataset，只读取其实际采样清�
 
 总入口只接收成功的原版effort+CE B0，校验checkpoint SHA及种子、epoch、batch、real ratio、c23和8/8帧设置。B阶段固定传--arms PUCE，只运行CE_L0和三个小权重配置，原版B0只训练一次；A明确传入该次B0目录，不会自动回到历史E0924权重。需要覆盖epoch、batch或数据路径时，在总入口传同名训练参数，同时用于新B0和B；复用B0时若训练条件不一致会在启动前报出差异。两个分支同时继承B0的实际索引目录、RGB根目录及CLIP路径；索引逐文件SHA与B0 manifest核对，RGB/CLIP覆盖与B0不一致时拒绝，避免两支使用不同数据或预训练源。旧配置省略的默认路径仅在原加载代码SHA一致时从其源码读取，不加载模型。
 
-原视频根目录可加 --raw_root，关键点权重可加 --predictor_path；其他数据/CLIP参数沿用现有入口。未改变A严格共享裁剪、P-D7或B的模型、损失、训练和选点规则。总入口仅执行服务器开发实验，不自动启动正式盲测。
+A不再要求原视频、dlib权重或共享重裁剪，直接读取与B0/B相同RGB根目录中的预处理图片。其他数据/CLIP参数沿用现有入口；P-D7、统计选参、B0/B训练条件均保持不变。总入口仅执行服务器开发实验，不自动启动正式盲测。
 
 总输出目录为 experiment_results/E1111/all/seed1024_本次时间戳/，包含B0.log、A.log、B.log和总all_results.json；每个分支保留自己的完整结果目录。看总调度日志用 tail -f nohup_E1111.log，具体训练日志路径在启动时打印。A因数据门槛或统计判据停止时，B仍继续；B0失败时两支均不启动。停止总进程时会终止其正在运行的子进程组。
 
@@ -79,11 +79,11 @@ B0训练前会构造与原管线相同的Dataset，只读取其实际采样清�
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111b.py \
       > nohup_E1111B.log 2>&1 &
 
-A复用已有B0，默认入口自动执行：索引盘点 → 内容配对 → 原视频共享裁剪 → P-D7审计 → 特征提取 → S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
+A复用已有B0，默认入口自动执行：索引盘点/路径视图 → 原预处理图片的内容配对 → P-D7审计 → 特征提取 → S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
 
 看日志：tail -f nohup_E1111A.log 或 tail -f nohup_E1111B.log。A的all_results.json保存当前阶段和停止原因；每次启动创建独立运行目录。P-D7等科研判据不通过时如实停止，不修改门槛。
 
-严格共享裁剪需要已有的**原始c23视频**。默认按同一数据根目录中的 FaceForensics++/.../c23/videos/视频名.mp4 查找；原视频在其他目录时加 --raw_root /实际根目录。关键点权重优先使用 preprocessing/shape_predictor_81_face_landmarks.dat，兼容 preprocessing/dlib_tools 下的旧路径，也可用 --predictor_path 指定。图片、索引、CLIP路径继承B0配置，仍支持旧实验同名覆盖参数。A在启动时检查这些输入；独立裁剪的PNG不能替代原视频来证明同一裁剪变换。
+A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处理图片；不生成新的裁剪目录，也不改变原JSON或PNG。原视频已删除不影响这一路径。对于绝对路径或带./的索引，程序仅生成指向同一文件的内部相对路径视图，保持帧列表顺序和样本成员不变；不会借此换图或放宽配对条件。
 
 训练结束后，终端会打印该次运行目录下的all_results.json。A可将**该次新运行目录**作为 --base_run；程序只接受成功的原生B0、读取B0/train_config.json并校验checkpoint SHA，不会误取PUCE权重。早期示例中的E0924路径仅用于旧B0复现；需要新B0时改用新运行目录。B0历史对照仍使用8帧评估；A的32帧统计结果单列，不与其直接混算。
 
@@ -94,7 +94,7 @@ A复用已有B0，默认入口自动执行：索引盘点 → 内容配对 → �
 1. FF++ 官方 train 的719个真实内容源按排序后 seed=1024 打乱，依次分为 fit/rad/sel/beta/theta = 395/72/58/57/137；官方 val 单列开发验证。实际划分保存为 splits.json。
 2. D_sel_FF++ 仅指这58个 FF++ train 源。CDF-v2 real train 的辅助诊断样本不参与 D1、τR、最终λm或配对差估计；CDF-v2 train 作为开发评估源使用。
 3. 每个真实源按数字帧位排序，等距选最多32个不同候选帧；不走旧 loader 的前8帧路径。缺图、坏图、未验证映射单列，禁止复制帧补齐。
-4. 配对需验证真实内容源、原始帧位对应和共同裁剪。A_B命名只作候选，不自动认定第一个ID就是内容源。共享裁剪从真实原视频帧估计一次仿射M，将原样的M应用到真假原视频帧；沿用原ArcFace模板、scale=1.3、256像素输出，假帧不独立检测或重新估计M。原始画布尺寸不同则排除，不盲目缩放。P-D7 要求 N4≥30、N4≥0.5×395（至少198）、Ncell≥0.9；未通过不进入 S0/S1。
+4. 配对验证真实内容源和原始帧位对应，直接使用原有独立对齐的PNG。A_B命名只作候选，不自动认定第一个ID就是内容源；不声明真假帧共用同一原始仿射矩阵。P-D7仍要求N4≥30、N4≥0.5×395（至少198）、Ncell≥0.9，未通过不进入S0/S1。裁剪误差可能混入配对差，但五项经验分解恒等式及其统一权重不变。
 5. 只用完整四方法源，每格统一 K_pair=min(n_v)。主 B、Dm、五项分解共用清单和权重。审计同时报告 K_pair、有效帧丢弃比例、共同帧丢弃比例、缺失格和剔除原因。
 6. μR/ΣR/Dc/Dtemporal 仍用全部 D_fit 真实源。Dc 的 Q 为所有有效(真实源,候选帧,JPEG质量)组合，质量固定15/30/40/50，每组合等权；提取时遇到新坏图直接失败。
 7. τR∈{0.1,0.3,0.5}：最小化 D_sel_FF++ 真实视频等权的高斯 NLL，使用与后续白化相同的特征值地板；相差≤1e-12时取小τR。
@@ -111,7 +111,6 @@ A复用已有B0，默认入口自动执行：索引盘点 → 内容配对 → �
 在 DeepfakeBench 目录执行。填写已有服务器路径；B0配置使用保存的完整 train_config.json，不要只用 detector YAML。
 
     export DB_DATA_ROOT=/path/to/preprocessed_rgb
-    export DB_RAW_ROOT=/path/to/original_video_root
     export DB_JSON=/path/to/dataset_json
     export DB_CLIP=/path/to/clip-vit-large-patch14
     export DB_B0=/path/to/B0.pth
@@ -120,26 +119,20 @@ A复用已有B0，默认入口自动执行：索引盘点 → 内容配对 → �
 
     # 1. 索引盘点：不读取图像，不把索引数量当成已验证配对数量
     python experiments/run_e1111a.py inventory \
-      --dataset-json "$DB_JSON/FaceForensics++.json" \
+      --dataset-json "$DB_JSON/FaceForensics++.json" --data-root "$DB_DATA_ROOT" \
       --output-dir "$E1111_OUT/inventory"
 
     # 2. 先复用 G21 内容配对工具，不能只凭命名猜内容源
     python experiments/verify_g21_pairing.py \
-      --dataset-json "$DB_JSON/FaceForensics++.json" \
+      --dataset-json "$E1111_OUT/inventory/dataset.json" \
       --data-root "$DB_DATA_ROOT" --output "$E1111_OUT/content_pairing"
 
-下一步由程序生成共享裁剪及收据，不修改人工验证标志。shared_crop_receipt.json保存真实参考矩阵、真假共同矩阵摘要、原视频/关键点权重摘要和实际生成PNG的SHA；audit逐帧比对该收据及图片字节。仅手填crop_alignment_verified=true或一段说明不再能通过严格同裁剪检查。
+内容核验与后续审计都指向同一批原图片，只在索引层选择配对，不生成裁剪文件或要求人工确认收据。
 
-    python experiments/run_e1111a.py prepare \
-      --dataset-json "$DB_JSON/FaceForensics++.json" \
-      --pair-map "$E1111_OUT/content_pairing/pair_map.json" \
-      --raw-root "$DB_RAW_ROOT" --output-dir "$E1111_OUT/shared_crop"
-
-    # 自动使用共享裁剪产物与收据
     python experiments/run_e1111a.py audit \
-      --dataset-json "$E1111_OUT/shared_crop/FaceForensics++.json" \
-      --data-root "$E1111_OUT/shared_crop/images" \
-      --pair-map "$E1111_OUT/shared_crop/pair_map.json" \
+      --dataset-json "$E1111_OUT/inventory/dataset.json" \
+      --data-root "$DB_DATA_ROOT" \
+      --pair-map "$E1111_OUT/content_pairing/pair_map.json" \
       --output-dir "$E1111_OUT/audit"
 
     # 3. 只有 P_D7_pass=true 才继续；失败不降低门槛
@@ -230,6 +223,8 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 
 第一条覆盖分解恒等式、数据门槛、帧平衡、归一化选参、内外层隔离、Fisher专用秩、零分母、视频分组、CE值/梯度、真实Trainer步与checkpoint重载。第二条检查E1025/G21原路径回归。随后先运行A的inventory/audit，确认实际数据，再决定是否进入后续统计与训练。
 
-新增共享裁剪测试还覆盖：仅在真实帧估计M、真假帧使用完全相同的M、原画布不一致时拒绝、矩阵记录不一致时拒绝、手填bool不能代替生成收据，以及完整runner在P-D7失败时不会加载模型。保留严格同裁剪改变了配对输入的生成方式，历史独立裁剪结果不能直接相减；原B0权重、统计阈值、选参规则和B支训练条件均保持不变。
+统一输入测试覆盖：没有任何MP4或关键点权重时可解析A输入；默认runner不调用共享裁剪；绝对路径与相对路径引用同一PNG且不重写像素；不要求裁剪收据；未验证源仍不能进入配对；P-D7失败仍停止。历史共享裁剪工具及独立prepare子命令保留供旧实验使用，不在默认A流程中。
 
 总调度器测试通过模拟子进程检查一次原版B0、同卡串行/异卡并行、CUDA设备隔离、复用基线、A停止后B继续、缺失结果拒绝成功和中断清理。本机未执行这些运行测试。
+
+2026-11-13数据协议调整：用户确认A与标准DeepfakeBench共用既有预处理帧。取消的是原视频共享重裁剪条件，不降低同源同帧验证、P-D7、平衡权重或统计阈值。A的裁剪输入与此前严格方案不同，旧A统计缓存按协议/源码摘要失效；B0/B模型及训练、历史8帧指标不受影响。A既定32帧候选采样、本轮评分和选点规则保持不变；对外结果仍须按同一取帧与指标口径比较。

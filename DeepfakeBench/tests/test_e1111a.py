@@ -145,19 +145,10 @@ def test_audit_uses_complete_sources_equal_frames_and_reports_discarding(tmp_pat
                 (0, 10) if v == ids[0] and method == methods[0] else (0, 10, 20))]}
             for v in ids}}}
         rules[method] = {"verified": True, "reference_component": 0, "evidence": "fixture",
-                         "same_original_index_verified": True, "crop_alignment_verified": True,
-                         "crop_alignment_evidence": "fixture shared transform"}
+                         "same_original_index_verified": True}
     data_path, map_path = tmp_path / "data.json", tmp_path / "map.json"
     data_path.write_text(json.dumps({"FaceForensics++": data}))
-    map_path.write_text(json.dumps({"schema_version": 1, "rules": rules,
-                                   "shared_crop_receipt": "receipt.json",
-                                   "shared_crop_receipt_sha256": "fixture"}))
-    receipt = {"dataset_content_sha256": digest(data), "receipt_sha256": "fixture",
-               "files_sha256": {path: "fixture" for branch in data.values()
-                                 for entry in branch["train"]["c23"].values() for path in entry["frames"]}}
-    monkeypatch.setattr(audit_module, "load_receipt", lambda *args: receipt)
-    monkeypatch.setattr(audit_module, "check_pair", lambda *args: True)
-    monkeypatch.setattr(audit_module, "file_digest", lambda path: "fixture")
+    map_path.write_text(json.dumps({"schema_version": 1, "rules": rules}))
     report = audit_module.audit(data_path, tmp_path, map_path, tmp_path / "audit")
     assert report["P_D7_pass"] and report["N4"] == 32 and report["Ncell"] == 1
     assert report["K_pair"] == 2 and len(report["fit_pairs"]) == 32 * 4 * 2
@@ -165,7 +156,7 @@ def test_audit_uses_complete_sources_equal_frames_and_reports_discarding(tmp_pat
     assert load_audit(tmp_path / "audit/audit.json")["audit_sha256"] == report["audit_sha256"]
 
 
-def test_manual_crop_flags_cannot_replace_generated_receipt(tmp_path, monkeypatch):
+def test_unverified_source_is_rejected_even_with_a_crop_claim(tmp_path, monkeypatch):
     ids = [str(i) for i in range(32)]
     monkeypatch.setattr(audit_module, "source_splits",
                         lambda _: {"fit": ids, "sel": [], "theta": [], "rad": [], "beta": []})
@@ -175,14 +166,42 @@ def test_manual_crop_flags_cannot_replace_generated_receipt(tmp_path, monkeypatc
     for method in protocol()["methods"]:
         data[method] = {"train": {"c23": {f"{v}_999": {"frames": [f"{method}/{v}/{t}.png" for t in (0, 1)]}
                                              for v in ids}}}
-    mapping = {"schema_version": 1, "rules": {m: {"verified": True, "reference_component": 0,
+    mapping = {"schema_version": 1, "rules": {m: {"verified": False, "reference_component": 0,
                "evidence": "source only", "same_original_index_verified": True,
                "crop_alignment_verified": True, "crop_alignment_evidence": "manual assertion"}
                for m in protocol()["methods"]}}
     (tmp_path / "data.json").write_text(json.dumps({"FaceForensics++": data}))
     (tmp_path / "map.json").write_text(json.dumps(mapping))
-    with pytest.raises(ValueError, match="manual flags"):
-        audit_module.audit(tmp_path / "data.json", tmp_path, tmp_path / "map.json", tmp_path / "result")
+    result = audit_module.audit(tmp_path / "data.json", tmp_path, tmp_path / "map.json", tmp_path / "result")
+    assert not result["P_D7_pass"] and not result["fit_pairs"]
+    assert {row["reason"] for row in result["mapping_exclusions"]} == {"source_mapping_unverified"}
+
+
+def test_absolute_index_view_references_the_same_pngs_without_rewriting_them(tmp_path, monkeypatch):
+    root = tmp_path / "images"
+    methods = protocol()["methods"]
+    data = {}
+    for method, video in [("FF-real", "000"), *[(m, "000_001") for m in methods]]:
+        paths = [root / method / video / f"{i:03d}.png" for i in (2, 0)]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"unchanged preprocessed pixels")
+        data[method] = {"train": {"c23": {video: {"frames": [str(p) for p in paths]}}}}
+    source = tmp_path / "original.json"
+    source.write_text(json.dumps({"FaceForensics++": data}))
+    original_bytes = source.read_bytes()
+    monkeypatch.setattr(audit_module, "source_splits", lambda _: {"fit": ["000"]})
+    report = audit_module.inventory(source, tmp_path / "inventory", data_root=root)
+    normalized = json.loads(Path(report["dataset_json"]).read_text())["FaceForensics++"]
+    for method, videos in data.items():
+        video = next(iter(videos["train"]["c23"]))
+        old = videos["train"]["c23"][video]
+        new = normalized[method]["train"]["c23"][video]
+        assert audit_module.frame_map(old, root) == audit_module.frame_map(new)
+        assert new["frames"] == [f"{method}/{video}/002.png", f"{method}/{video}/000.png"]
+        for path in new["frames"]:
+            assert (root / path).read_bytes() == b"unchanged preprocessed pixels"
+    assert source.read_bytes() == original_bytes
 
 
 def test_s1_clusters_sources_and_refuses_blind_results(tmp_path, monkeypatch):

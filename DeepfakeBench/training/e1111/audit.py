@@ -1,6 +1,6 @@
 """FF++ source splits and image-verified balanced pairing, independent of scores."""
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 import json
 from pathlib import Path, PurePosixPath
 import random
@@ -10,13 +10,25 @@ from g21.io import atomic_json, file_digest
 from g21.manifest import image_path, relative_path
 
 from .protocol import digest, implementation_digest, protocol
-from .shared_crop import check_pair, load_receipt
 
 
-def frame_map(entry):
+def canonical_frame_path(raw, data_root=None):
+    text = raw.replace("\\", "/")
+    path = Path(text)
+    if path.is_absolute():
+        if data_root is None:
+            raise ValueError("Absolute frame paths require the configured RGB data root")
+        try:
+            text = path.resolve().relative_to(Path(data_root).resolve()).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"Frame path is outside the configured RGB root: {raw}") from exc
+    return relative_path(PurePosixPath(text).as_posix())
+
+
+def frame_map(entry, data_root=None):
     result = {}
     for raw in entry["frames"]:
-        path = relative_path(raw.replace("\\", "/"))
+        path = canonical_frame_path(raw, data_root)
         frame = int(PurePosixPath(path).stem)
         if frame in result:
             raise ValueError(f"Duplicate frame index: {path}")
@@ -41,7 +53,18 @@ def gate(n4, cell_coverage, n_fit):
     return n4 >= 30 and n4 >= .5 * n_fit and cell_coverage >= .9
 
 
-def inventory(dataset_json, output):
+def _index_paths(value, data_root):
+    """Change only internal path spelling, never pixels, ordering or membership."""
+    if isinstance(value, dict):
+        return {key: [canonical_frame_path(p, data_root) if isinstance(p, str) else p for p in item]
+                if key in ("frames", "masks", "landmarks") and isinstance(item, list)
+                else _index_paths(item, data_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_index_paths(item, data_root) for item in value]
+    return value
+
+
+def inventory(dataset_json, output, *, data_root=None):
     data = json.loads(Path(dataset_json).read_text(encoding="utf-8-sig"))["FaceForensics++"]
     settings = protocol()
     split = source_splits(data["FF-real"]["train"]["c23"])
@@ -53,10 +76,16 @@ def inventory(dataset_json, output):
         "dataset_sha256": digest(data),
         "indexed_train_videos": {method: len(data[method]["train"]["c23"])
                                  for method in ["FF-real", *settings["methods"]]},
-        "note": "Index inventory only. No source/time/crop correspondence or file availability verified.",
+        "note": "Index inventory only; existing DeepfakeBench crop files, no source/time correspondence yet verified.",
     }
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
+    if data_root is not None:
+        normalized = _index_paths(data, data_root)
+        index_path = output / "dataset.json"
+        atomic_json(index_path, {"FaceForensics++": normalized})
+        report.update(dataset_json=str(index_path.resolve()), original_index_sha256=file_digest(dataset_json),
+                      path_view="same original files; absolute paths expressed relative to RGB root")
     atomic_json(output / "inventory.json", report)
     atomic_json(output / "splits.json", split)
     return report
@@ -81,31 +110,22 @@ def audit(dataset_json, data_root, pair_map, output):
     mapping = json.loads(Path(pair_map).read_text(encoding="utf-8-sig"))
     if mapping.get("schema_version") != 1:
         raise ValueError("Unsupported pair-map schema")
-    if not mapping.get("shared_crop_receipt"):
-        raise ValueError("Strict same-crop evidence is absent: generate shared crops from original videos; manual flags do not establish it")
-    receipt = load_receipt(image_path(Path(pair_map).parent, mapping["shared_crop_receipt"]),
-                           data_root, mapping.get("shared_crop_receipt_sha256"))
-    if receipt["dataset_content_sha256"] != digest(data):
-        raise ValueError("Shared crops and dataset metadata differ")
     settings = protocol()
     reals = data["FF-real"]["train"]["c23"]
     splits = source_splits(reals)
     source_split = {source: split for split, sources in splits.items() for source in sources}
     selected_real, checked = {}, {}
     invalid_paths = []
-    crop_rejections = []
 
     def readable(path):
         if path not in checked:
-            expected = receipt["files_sha256"].get(path)
-            checked[path] = bool(expected and _valid_image(data_root, path)
-                                 and file_digest(image_path(data_root, path)) == expected)
+            checked[path] = _valid_image(data_root, path)
             if not checked[path]:
                 invalid_paths.append(path)
         return checked[path]
 
     for source, entry in sorted(reals.items()):
-        frames = frame_map(entry)
+        frames = frame_map(entry, data_root)
         keys = sorted(frames)
         candidates = [keys[i] for i in uniform_indices(len(keys), settings["candidate_frames"])]
         selected_real[source] = {t: frames[t] for t in candidates if readable(frames[t])}
@@ -141,7 +161,7 @@ def audit(dataset_json, data_root, pair_map, output):
                         "content_split": source_split[source], "other_source_id": other,
                         "other_split": source_split.get(other, "not_official_train"),
                     })
-            fake = frame_map(entry)
+            fake = frame_map(entry, data_root)
             matches = rule.get("frame_matches")
             if matches is None:
                 if rule.get("same_original_index_verified") is not True:
@@ -157,11 +177,6 @@ def audit(dataset_json, data_root, pair_map, output):
             frames = {}
             for real_index, fake_index in matches:
                 if real_index in selected_real[source] and fake_index in fake and readable(fake[fake_index]):
-                    if not check_pair(receipt, selected_real[source][real_index], fake[fake_index],
-                                      source, real_index, fake_index):
-                        crop_rejections.append({"method": method, "video": key,
-                                                "real_frame": real_index, "fake_frame": fake_index})
-                        continue
                     frames[real_index] = {
                         "source": source, "split": source_split[source], "method": method,
                         "frame": real_index, "real_path": selected_real[source][real_index],
@@ -206,8 +221,8 @@ def audit(dataset_json, data_root, pair_map, output):
         "n_vm": counts, "n_v": {v: len(common[v]) for v in fit},
         "complete_sources": complete, "discarded_sources": sorted(set(fit) - set(complete)),
         "invalid_paths": invalid_paths, "mapping_exclusions": exclusions, "ambiguous_cells": ambiguous,
-        "shared_crop_receipt_sha256": receipt["receipt_sha256"],
-        "crop_frame_rejections": crop_rejections,
+        "input_preprocessing": settings["input_preprocessing"],
+        "crop_scope": "existing independently aligned crops; no shared-affine claim",
         "missing_cells_by_method": {m: sum(counts[v][m] == 0 for v in fit) for m in methods},
         "discarded_valid_pair_fraction": None if not total_valid else 1 - retained / total_valid,
         "discarded_common_pair_fraction": None if not complete_common else 1 - retained / complete_common,

@@ -231,7 +231,7 @@ def export_dataset(dataset_json, dataset_id, split, data_root, config, checkpoin
         for video, entry in sorted(videos.items()):
             if entry["label"] not in extractor.label_dict:
                 raise ValueError(f"Unknown dataset label: {entry['label']}")
-            frames = frame_map(entry)
+            frames = frame_map(entry, data_root)
             ordered = sorted(frames)
             for i in uniform_indices(len(ordered), protocol()["candidate_frames"]):
                 path = frames[ordered[i]]

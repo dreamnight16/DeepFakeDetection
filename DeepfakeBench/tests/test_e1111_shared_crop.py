@@ -94,6 +94,24 @@ def load_runner(monkeypatch):
     return module
 
 
+def test_standard_inputs_require_no_original_videos_or_predictor(tmp_path, monkeypatch):
+    runner = load_runner(monkeypatch)
+    root, metadata, clip = (tmp_path / name for name in ("images", "metadata", "clip"))
+    for path in (root, metadata, clip):
+        path.mkdir()
+    for name in ("FaceForensics++", "Celeb-DF-v2"):
+        (metadata / f"{name}.json").write_text("{}")
+    source = {"config": {"label_dict": {}, "dataset_json_folder": str(metadata),
+                         "rgb_root_override": str(root), "clip_pretrained_path": str(clip)}}
+    monkeypatch.setattr(runner, "resolve_source", lambda args: source)
+    args = argparse.Namespace(seed=1024, dataset_json_folder=None, rgb_root=None,
+                              clip_pretrained_path=None)
+    result = runner.resolve_inputs(args)
+    assert result["data_root"] == root.resolve()
+    assert "raw_root" not in result and "predictor" not in result
+    assert not list(root.rglob("*.mp4"))
+
+
 @pytest.mark.parametrize("gate_pass", [False, True])
 def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypatch, gate_pass):
     from e1111 import audit, features, pipeline
@@ -103,9 +121,7 @@ def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypat
     calls = []
     source = {"checkpoint": "B0.pth", "config_path": "B0.json", "base_sha256": "b0",
               "config_sha256": "cfg"}
-    inputs = {"source": source, "config": {}, "metadata": tmp_path, "data_root": tmp_path,
-              "raw_root": tmp_path, "clip": tmp_path, "predictor": tmp_path / "predictor.dat",
-              "raw_fake_video_counts": {m: 32 for m in protocol()["methods"]}}
+    inputs = {"source": source, "config": {}, "metadata": tmp_path, "data_root": tmp_path, "clip": tmp_path}
     monkeypatch.setattr(runner, "resolve_inputs", lambda args: inputs)
 
     def record(name, result):
@@ -114,12 +130,17 @@ def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypat
             return result
         return run
 
-    monkeypatch.setattr(audit, "inventory", record("inventory", {}))
+    monkeypatch.setattr(audit, "inventory", record("inventory", {"dataset_json": str(tmp_path / "index.json")}))
     monkeypatch.setattr(pairing, "run_pairing", record("pairing", {}))
-    monkeypatch.setattr(shared_crop, "prepare", record("crop", {
-        "dataset_json": "prepared.json", "images": "images", "pair_map": "prepared_map.json"}))
-    monkeypatch.setattr(audit, "audit", record("audit", {"P_D7_pass": gate_pass,
-                        "status": "P_D7_PASS" if gate_pass else "S0_PAUSED_P_D7"}))
+    def forbidden_crop(*args, **kwargs):
+        raise AssertionError("Default A must not generate new crops or require original videos")
+    monkeypatch.setattr(shared_crop, "prepare", forbidden_crop)
+    def audit_same_inputs(dataset, data_root, *args):
+        assert Path(dataset) == tmp_path / "index.json"
+        assert data_root == inputs["data_root"]
+        return record("audit", {"P_D7_pass": gate_pass,
+                      "status": "P_D7_PASS" if gate_pass else "S0_PAUSED_P_D7"})()
+    monkeypatch.setattr(audit, "audit", audit_same_inputs)
     monkeypatch.setattr(features, "extract", record("features", {}))
     monkeypatch.setattr(pipeline, "run_s0", record("s0", {"status": "S0_PASS"}))
     monkeypatch.setattr(pipeline, "calibrate", record("calibrate", {}))
@@ -130,10 +151,10 @@ def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypat
                               pair_map=None, device="cpu", batch_size=8, skip_d8=False)
     result = runner.run(args)
     if not gate_pass:
-        assert calls == ["inventory", "pairing", "crop", "audit"]
+        assert calls == ["inventory", "pairing", "audit"]
         assert result["status"] == "S0_PAUSED_P_D7"
     else:
-        assert calls == ["inventory", "pairing", "crop", "audit", "features", "s0", "calibrate",
+        assert calls == ["inventory", "pairing", "audit", "features", "s0", "calibrate",
                          "export", "score", "export", "score", "attribution"]
         assert result["status"] == "DEVELOPMENT_COMPLETE"
 

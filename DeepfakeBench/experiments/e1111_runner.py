@@ -59,10 +59,7 @@ def resolve_source(args):
 
 def resolve_inputs(args):
     import yaml
-    from e1111.shared_crop import raw_video_path
-    from e1111.audit import source_splits
     from e1111.protocol import protocol
-    from g21.manifest import image_path
 
     if args.seed != protocol()["seed"]:
         raise ValueError("This frozen E1111A protocol uses seed=1024")
@@ -78,42 +75,18 @@ def resolve_inputs(args):
     metadata = Path(args.dataset_json_folder or (
         local_metadata if local_metadata.is_dir() else config["dataset_json_folder"]))
     data_root = Path(args.rgb_root or config.get("rgb_root_override", "/home/user1/effort/data"))
-    raw_root = Path(args.raw_root or data_root)
     clip = Path(args.clip_pretrained_path or config.get(
         "clip_pretrained_path", ROOT / "training/models--openai--clip-vit-large-patch14"))
-    predictor = Path(args.predictor_path)
-    for path in (metadata / "FaceForensics++.json", metadata / "Celeb-DF-v2.json", predictor):
+    for path in (metadata / "FaceForensics++.json", metadata / "Celeb-DF-v2.json"):
         if not path.is_file():
             raise FileNotFoundError(f"Required E1111A input is missing: {path}")
-    for path in (data_root, raw_root, clip):
+    for path in (data_root, clip):
         if not path.is_dir():
             raise FileNotFoundError(f"Required E1111A directory is missing: {path}")
-    data = json.loads((metadata / "FaceForensics++.json").read_text(encoding="utf-8-sig"))["FaceForensics++"]
-    reals = data["FF-real"]["train"]["c23"]
-    splits = source_splits(reals)
-    required_sources = {v for split, values in splits.items() if split != "beta" for v in values}
-    missing_real = []
-    for v in sorted(required_sources):
-        frames = reals[v]["frames"]
-        if not frames:
-            missing_real.append(v)
-        elif not image_path(raw_root, raw_video_path(frames[0])).is_file():
-            missing_real.append(v)
-    if missing_real:
-        raise FileNotFoundError(
-            f"Strict shared cropping requires original c23 videos under {raw_root}; "
-            f"{len(missing_real)} required real videos are missing, examples={missing_real[:8]}. "
-            "Use --raw_root for the existing original-video root; cropped PNGs cannot replace these videos.")
-    raw_fake_counts = {method: sum(bool(entry["frames"]) and image_path(
-        raw_root, raw_video_path(entry["frames"][0])).is_file()
-        for entry in data[method]["train"]["c23"].values()) for method in protocol()["methods"]}
-    if any(count == 0 for count in raw_fake_counts.values()):
-        raise FileNotFoundError(f"An original manipulated-video method is absent under {raw_root}: {raw_fake_counts}")
     config.update(dataset_json_folder=str(metadata.resolve()), rgb_root_override=str(data_root.resolve()),
                   clip_pretrained_path=str(clip.resolve()))
     return {"source": source, "config": config, "metadata": metadata.resolve(),
-            "data_root": data_root.resolve(), "raw_root": raw_root.resolve(), "clip": clip.resolve(),
-            "predictor": predictor.resolve(), "raw_fake_video_counts": raw_fake_counts}
+            "data_root": data_root.resolve(), "clip": clip.resolve()}
 
 
 def run(args):
@@ -122,7 +95,6 @@ def run(args):
     from e1111.features import extract, export_dataset
     from e1111.pipeline import run_s0, calibrate, score_export, attribution
     from e1111.protocol import protocol
-    from e1111.shared_crop import prepare
     from g21.pairing import run_pairing
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -142,8 +114,7 @@ def run(args):
         save()
         result = function(*values, **keywords)
         manifest["stages"][name] = {key: result[key] for key in (
-            "status", "N4", "Ncell", "K_pair", "real_crops", "fake_crops", "failures",
-            "passed", "rho_sum", "receipt_sha256", "usable_pairs") if key in result}
+            "status", "N4", "Ncell", "K_pair", "passed", "rho_sum", "usable_pairs") if key in result}
         print(f"E1111A/{name}: {manifest['stages'][name]}", flush=True)
         save()
         return result
@@ -154,7 +125,8 @@ def run(args):
         inputs = resolve_inputs(args)
         source = inputs["source"]
         manifest["base"] = {key: source[key] for key in ("checkpoint", "config_path", "base_sha256", "config_sha256")}
-        manifest["raw_fake_video_counts"] = inputs["raw_fake_video_counts"]
+        manifest["input_preprocessing"] = protocol()["input_preprocessing"]
+        manifest["rgb_root"] = str(inputs["data_root"])
         config_path = output / "resolved_base_config.json"
         atomic_json(config_path, inputs["config"])
         if args.preflight:
@@ -162,16 +134,14 @@ def run(args):
             save()
             return manifest
         ff_json = inputs["metadata"] / "FaceForensics++.json"
-        stage("inventory", inventory, ff_json, output / "inventory")
+        indexed = stage("inventory", inventory, ff_json, output / "inventory", data_root=inputs["data_root"])
+        ff_index = Path(indexed["dataset_json"])
         if args.pair_map:
             pair_map = args.pair_map
         else:
-            stage("content_pairing", run_pairing, ff_json, inputs["data_root"], output / "content_pairing")
+            stage("content_pairing", run_pairing, ff_index, inputs["data_root"], output / "content_pairing")
             pair_map = output / "content_pairing/pair_map.json"
-        crops = stage("shared_crop", prepare, ff_json, pair_map, inputs["raw_root"],
-                      inputs["predictor"], output / "shared_crop")
-        audited = stage("audit", audit, crops["dataset_json"], crops["images"],
-                        crops["pair_map"], output / "audit")
+        audited = stage("audit", audit, ff_index, inputs["data_root"], pair_map, output / "audit")
         if not audited["P_D7_pass"]:
             manifest.update(status=audited["status"], stage="audit")
             save()

@@ -33,9 +33,7 @@ def build_parser():
     parser.add_argument("--feature_batch_size", type=int, default=8)
     parser.add_argument("--dataset_json_folder", type=Path)
     parser.add_argument("--rgb_root", type=Path)
-    parser.add_argument("--raw_root", type=Path)
     parser.add_argument("--clip_pretrained_path", type=Path)
-    parser.add_argument("--predictor_path", type=Path)
     parser.add_argument("--pair_map", type=Path)
     parser.add_argument("--skip_d8", action="store_true")
     parser.add_argument("--dry_run", "--dry-run", action="store_true")
@@ -69,8 +67,7 @@ def a_command(args, base_run, output):
                "--base_run", str(base_run), "--output_dir", str(output),
                "--seed", str(args.seed), "--batch_size", str(args.feature_batch_size),
                "--device", "cuda:0"]
-    for key in ("dataset_json_folder", "rgb_root", "raw_root", "clip_pretrained_path",
-                "predictor_path", "pair_map"):
+    for key in ("dataset_json_folder", "rgb_root", "clip_pretrained_path", "pair_map"):
         if getattr(args, key) is not None:
             command.extend([f"--{key}", str(getattr(args, key))])
     if args.skip_d8:
