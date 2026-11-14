@@ -27,6 +27,30 @@ def test_split_is_source_disjoint_and_fixed():
     assert len(flattened) == len(set(flattened)) == 719
 
 
+def test_frozen_features_supports_native_backbone_without_return_dict(monkeypatch):
+    import torch
+    from types import SimpleNamespace
+    from e1111 import features
+
+    batches = []
+    class NativeBackbone:
+        def __call__(self, pixels, /):
+            batches.append(len(pixels))
+            tokens = torch.arange(257, dtype=torch.float32)[None, :, None].expand(len(pixels), 257, 1024).clone()
+            tokens[:, 0] = 1e6  # CLS must be excluded from the pooled feature.
+            tokens[:, 1:] += pixels[:, 0, 0, 0][:, None, None]
+            return {"last_hidden_state": tokens}
+
+    monkeypatch.setattr(features, "normalized_tensor", lambda rgb: torch.full(
+        (3, 224, 224), float(rgb[0, 0, 0])))
+    extractor = features.FrozenFeatures.__new__(features.FrozenFeatures)
+    extractor.model = SimpleNamespace(backbone=NativeBackbone())
+    extractor.device, extractor.batch_size = "cpu", 2
+    values = extractor.encode(np.full((8, 8, 3), i, dtype=np.uint8) for i in range(3))
+    assert batches == [2, 1] and values.shape == (3, 1024)
+    np.testing.assert_allclose(values, np.broadcast_to(np.arange(3)[:, None] + 128.5, (3, 1024)))
+
+
 def test_hard_gate_and_zero_denominators(tmp_path):
     assert not gate(197, 1., 395) and not gate(198, .899, 395)
     assert gate(198, .9, 395)

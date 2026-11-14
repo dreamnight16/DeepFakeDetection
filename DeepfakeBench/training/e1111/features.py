@@ -82,7 +82,7 @@ class FrozenFeatures:
         def flush():
             pixels = torch.stack(batch).to(self.device)
             with torch.no_grad():
-                tokens = self.model.backbone(pixel_values=pixels, return_dict=True).last_hidden_state
+                tokens = self.model.backbone(pixels)["last_hidden_state"]
                 if tuple(tokens.shape[1:]) != (257, 1024):
                     raise ValueError("Expected CLIP ViT-L/14 last hidden state (N,257,1024)")
                 output.append(tokens[:, 1:].mean(dim=1).cpu().float().numpy())
