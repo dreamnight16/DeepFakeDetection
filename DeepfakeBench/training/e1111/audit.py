@@ -64,13 +64,14 @@ def _index_paths(value, data_root):
     return value
 
 
-def inventory(dataset_json, output, *, data_root=None):
+def inventory(dataset_json, output, *, data_root=None, statistic_mode="paired_frame"):
     data = json.loads(Path(dataset_json).read_text(encoding="utf-8-sig"))["FaceForensics++"]
-    settings = protocol()
+    settings = protocol(statistic_mode)
     split = source_splits(data["FF-real"]["train"]["c23"])
     report = {
         "status": "MAPPING_AND_IMAGES_REQUIRED", "P_D7_pass": False,
         "N4": None, "Ncell": None, "K_pair": None, "protocol": settings,
+        "statistic_mode": statistic_mode,
         "protocol_sha256": digest(settings), "splits": split,
         "audit_implementation_sha256": implementation_digest("audit"),
         "dataset_sha256": digest(data),
@@ -102,18 +103,21 @@ def _valid_image(root, relative):
         return False
 
 
-def index_pairing(dataset_json, output, *, data_root=None):
-    """Use FF++ target_source lineage and exact saved original frame indices."""
+def index_pairing(dataset_json, output, *, data_root=None, statistic_mode="paired_frame"):
+    """Use official lineage, with temporal intersections only in the legacy mode."""
     data = json.loads(Path(dataset_json).read_text(encoding="utf-8-sig"))["FaceForensics++"]
-    methods = protocol()["methods"]
+    methods = protocol(statistic_mode)["methods"]
     reals = data["FF-real"]["train"]["c23"]
     evidence = (
         "FF++ official filenames are <target sequence>_<source sequence>; "
-        "target component 0 is the reference. Repository preprocessing preserves "
-        "the original cnt_frame in PNG filenames; pairs use equal saved indices. "
+        "target component 0 is the reference. "
         "https://github.com/ondyari/FaceForensics/blob/master/dataset/README.md")
+    if statistic_mode == "paired_frame":
+        evidence += " Repository preprocessing preserves original cnt_frame; pairs use equal saved indices."
     mapping = {"schema_version": 1, "dataset_sha256": digest(data),
-               "pairing_mode": "ffpp_official_target_original_index",
+               "statistic_mode": statistic_mode,
+               "pairing_mode": "ffpp_official_target_video_bags" if statistic_mode == "video_mean"
+                               else "ffpp_official_target_original_index",
                "rules": {}, "overrides": {}}
     decisions = []
     for method in methods:
@@ -128,24 +132,30 @@ def index_pairing(dataset_json, output, *, data_root=None):
                 real = frame_map(reals[ids[0]], data_root)
                 fake = frame_map(entry, data_root)
                 common = sorted(real.keys() & fake.keys())
-                if len(common) < 2:
+                if statistic_mode == "video_mean" and min(len(real), len(fake)) < 2:
+                    reason = "insufficient_independent_video_frames"
+                elif statistic_mode == "paired_frame" and len(common) < 2:
                     reason = "insufficient_saved_frame_intersection"
             if reason:
                 mapping["overrides"][f"{method}/{key}"] = {
                     "excluded": True, "exclude_reason": reason}
                 decisions.append({"method": method, "video": key, "reason": reason})
                 continue
-            mapping["overrides"][f"{method}/{key}"] = {
-                "verified": True, "reference_component": 0,
-                "same_original_index_verified": True, "evidence": evidence,
-                "frame_matches": [[index, index] for index in common]}
+            rule = {"verified": True, "reference_component": 0, "evidence": evidence}
+            if statistic_mode == "paired_frame":
+                rule.update(same_original_index_verified=True,
+                            frame_matches=[[index, index] for index in common])
+            mapping["overrides"][f"{method}/{key}"] = rule
             decisions.append({"method": method, "video": key, "reason": "index_pairable",
-                              "reference": ids[0], "common_frames": len(common)})
+                              "reference": ids[0], "common_frames": len(common),
+                              "real_frames": len(real), "fake_frames": len(fake)})
     report = {
         "status": "INDEX_PAIRING_READY", "pairing_mode": mapping["pairing_mode"],
         "index_pairable_videos": sum(row["reason"] == "index_pairable" for row in decisions),
         "excluded_videos": sum(row["reason"] != "index_pairable" for row in decisions),
-        "verification_scope": "official lineage and equal saved frame indices; image availability is checked by audit",
+        "statistic_mode": statistic_mode,
+        "verification_scope": "official lineage and independent frame sets; no time alignment" if statistic_mode == "video_mean"
+                              else "official lineage and equal saved frame indices; image availability is checked by audit",
         "pixel_similarity_is_gate": False, "decisions": decisions,
         "dataset_sha256": digest(data)}
     output = Path(output)
@@ -155,7 +165,7 @@ def index_pairing(dataset_json, output, *, data_root=None):
     return report
 
 
-def audit(dataset_json, data_root, pair_map, output):
+def audit(dataset_json, data_root, pair_map, output, *, statistic_mode="paired_frame"):
     data_root = Path(data_root)
     if not data_root.is_dir():
         raise FileNotFoundError(f"Data root is absent: {data_root}")
@@ -165,7 +175,9 @@ def audit(dataset_json, data_root, pair_map, output):
         raise ValueError("Unsupported pair-map schema")
     if mapping.get("dataset_sha256") is not None and mapping["dataset_sha256"] != digest(data):
         raise ValueError("Pair map was generated from different dataset metadata")
-    settings = protocol()
+    if mapping.get("statistic_mode", statistic_mode) != statistic_mode:
+        raise ValueError("Pair map uses a different statistic mode; regenerate it")
+    settings = protocol(statistic_mode)
     reals = data["FF-real"]["train"]["c23"]
     splits = source_splits(reals)
     source_split = {source: split for split, sources in splits.items() for source in sources}
@@ -217,6 +229,15 @@ def audit(dataset_json, data_root, pair_map, output):
                         "other_split": source_split.get(other, "not_official_train"),
                     })
             fake = frame_map(entry, data_root)
+            if statistic_mode == "video_mean":
+                keys = sorted(fake)
+                positions = [keys[i] for i in uniform_indices(len(keys), settings["candidate_frames"])]
+                frames = {t: {"source": source, "split": source_split[source], "method": method,
+                              "frame": t, "fake_path": fake[t],
+                              "video_id": f"ffpp/c23/{method}/{key}"}
+                          for t in positions if readable(fake[t])}
+                cells[(source, method)].append(frames)
+                continue
             matches = rule.get("frame_matches")
             if matches is None:
                 if rule.get("same_original_index_verified") is not True:
@@ -251,36 +272,50 @@ def audit(dataset_json, data_root, pair_map, output):
 
     fit = splits["fit"]
     methods = settings["methods"]
-    counts = {v: {m: len(valid.get((v, m), {})) for m in methods} for v in fit}
+    counts = {v: {m: len(valid.get((v, m), {}))
+                  if statistic_mode == "paired_frame" or len(selected_real[v]) >= 2 else 0
+                  for m in methods} for v in fit}
     common = {v: sorted(set.intersection(*(set(valid.get((v, m), {})) for m in methods)))
               for v in fit}
-    complete = sorted(v for v in fit if len(common[v]) >= 2)
+    complete = sorted(v for v in fit if (all(n >= 2 for n in counts[v].values())
+                                        if statistic_mode == "video_mean" else len(common[v]) >= 2))
     n4 = len(complete)
     coverage = sum(n >= 2 for row in counts.values() for n in row.values()) / (len(fit) * len(methods))
     passed = gate(n4, coverage, len(fit))
-    k = min((len(common[v]) for v in complete), default=None)
+    k = min((len(common[v]) for v in complete), default=None) if statistic_mode == "paired_frame" else None
     balanced = []
-    if passed:
+    if passed and statistic_mode == "paired_frame":
         for v in complete:
             positions = [common[v][i] for i in uniform_indices(len(common[v]), k)]
             balanced.extend(valid[(v, m)][t] for m in methods for t in positions)
     sel_pairs = [frame for (v, _), frames in sorted(valid.items()) if v in splits["sel"]
-                 for _, frame in sorted(frames.items())]
+                 for _, frame in sorted(frames.items())] if statistic_mode == "paired_frame" else []
+    def video_bags(sources):
+        return [{"source": v, "method": m, "video_id": next(iter(frames.values()))["video_id"],
+                 "frames": [row for _, row in sorted(frames.items())]}
+                for (v, m), frames in sorted(valid.items())
+                if v in sources and len(selected_real[v]) >= 2 and len(frames) >= 2]
+    fit_videos = video_bags(complete) if statistic_mode == "video_mean" and passed else []
+    sel_videos = video_bags(splits["sel"]) if statistic_mode == "video_mean" else []
     total_valid = sum(n for row in counts.values() for n in row.values())
     complete_common = len(methods) * sum(len(common[v]) for v in complete)
     retained = len(balanced)
     report = {
         "status": "P_D7_PASS" if passed else "S0_PAUSED_P_D7", "P_D7_pass": passed,
-        "N4": n4, "Ncell": coverage, "K_pair": k, "retained_pairs": retained,
+        "N4": n4, "Ncell": coverage, "K_pair": k,
+        "statistic_mode": statistic_mode,
+        "retained_pairs": retained if statistic_mode == "paired_frame" else None,
         "fit_source_count": len(fit), "required_complete_sources": max(30, (len(fit) + 1) // 2),
-        "n_vm": counts, "n_v": {v: len(common[v]) for v in fit},
+        "n_vm": counts, "n_v": {v: min([len(selected_real[v]), *counts[v].values()])
+                                if statistic_mode == "video_mean" else len(common[v]) for v in fit},
         "complete_sources": complete, "discarded_sources": sorted(set(fit) - set(complete)),
         "invalid_paths": invalid_paths, "mapping_exclusions": exclusions, "ambiguous_cells": ambiguous,
         "input_preprocessing": settings["input_preprocessing"],
-        "crop_scope": "existing independently aligned crops; no shared-affine claim",
+        "crop_scope": settings["crop_scope"],
+        "coverage_definition": settings["P_D7"].get("unit", "source x method with at least 2 same-index pairs"),
         "missing_cells_by_method": {m: sum(counts[v][m] == 0 for v in fit) for m in methods},
-        "discarded_valid_pair_fraction": None if not total_valid else 1 - retained / total_valid,
-        "discarded_common_pair_fraction": None if not complete_common else 1 - retained / complete_common,
+        "discarded_valid_pair_fraction": None if statistic_mode == "video_mean" or not total_valid else 1 - retained / total_valid,
+        "discarded_common_pair_fraction": None if statistic_mode == "video_mean" or not complete_common else 1 - retained / complete_common,
         "protocol": settings, "protocol_sha256": digest(settings), "splits": splits,
         "audit_implementation_sha256": implementation_digest("audit"),
         "split_scope": "content-reference sources; not both FF++ source lineages",
@@ -292,6 +327,12 @@ def audit(dataset_json, data_root, pair_map, output):
                                     for t, p in sorted(selected_real[v].items())] for v in sources}
                         for split, sources in splits.items()},
     }
+    if statistic_mode == "video_mean":
+        report.update(fit_videos=fit_videos, sel_videos=sel_videos,
+                      video_frame_counts={"real": {v: len(rows) for v, rows in selected_real.items()},
+                                          "fake": {f"{v}/{m}": len(frames) for (v, m), frames in valid.items()}},
+                      retained_fake_frames=sum(len(bag["frames"]) for bag in fit_videos),
+                      frame_weighting="mean within each video, then equal source x method weight; no shared K")
     for split in ("fit", "sel", "theta", "rad"):
         empty = [v for v, frames in report["real_frames"][split].items() if not frames]
         if empty:

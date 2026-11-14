@@ -35,6 +35,7 @@ def build_parser():
     parser.add_argument("--rgb_root", type=Path)
     parser.add_argument("--clip_pretrained_path", type=Path)
     parser.add_argument("--pair_map", type=Path)
+    parser.add_argument("--a_statistic_mode", choices=("video_mean", "paired_frame"), default="video_mean")
     parser.add_argument("--skip_d8", action="store_true")
     parser.add_argument("--dry_run", "--dry-run", action="store_true")
     return parser
@@ -66,7 +67,7 @@ def a_command(args, base_run, output):
     command = [sys.executable, "-u", str(SCRIPTS / "run_e1111a.py"),
                "--base_run", str(base_run), "--output_dir", str(output),
                "--seed", str(args.seed), "--batch_size", str(args.feature_batch_size),
-               "--device", "cuda:0"]
+               "--device", "cuda:0", "--statistic_mode", args.a_statistic_mode]
     for key in ("dataset_json_folder", "rgb_root", "clip_pretrained_path", "pair_map"):
         if getattr(args, key) is not None:
             command.extend([f"--{key}", str(getattr(args, key))])

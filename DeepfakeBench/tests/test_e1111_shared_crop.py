@@ -134,9 +134,10 @@ def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypat
     def forbidden_crop(*args, **kwargs):
         raise AssertionError("Default A must not generate new crops or require original videos")
     monkeypatch.setattr(shared_crop, "prepare", forbidden_crop)
-    def audit_same_inputs(dataset, data_root, *args):
+    def audit_same_inputs(dataset, data_root, *args, **kwargs):
         assert Path(dataset) == tmp_path / "index.json"
         assert data_root == inputs["data_root"]
+        assert kwargs["statistic_mode"] == "video_mean"
         return record("audit", {"P_D7_pass": gate_pass,
                       "status": "P_D7_PASS" if gate_pass else "S0_PAUSED_P_D7"})()
     monkeypatch.setattr(audit, "audit", audit_same_inputs)

@@ -40,6 +40,47 @@ def paired_features(audit, lookup):
     return delta, {m: {s: np.stack(x) for s, x in groups.items()} for m, groups in held.items()}
 
 
+def video_mean_features(audit, lookup):
+    """One difference of independently averaged video features per source/method."""
+    methods = protocol("video_mean")["methods"]
+    real = {source: np.mean([lookup[row["path"]] for row in rows], axis=0)
+            for split in ("fit", "sel") for source, rows in audit["real_frames"][split].items()}
+    def difference(bag):
+        if len(bag["frames"]) < 2:
+            raise ProtocolError("Video-mean bag contains fewer than two frames")
+        return np.mean([lookup[row["fake_path"]] for row in bag["frames"]], axis=0) - real[bag["source"]]
+    cells = {}
+    for bag in audit["fit_videos"]:
+        key = (bag["source"], bag["method"])
+        if key in cells or bag["source"] not in audit["complete_sources"]:
+            raise ProtocolError("Duplicate or unexpected fit video-mean cell")
+        cells[key] = difference(bag)
+    if len(cells) != audit["N4"] * len(methods):
+        raise ProtocolError("Video-mean design is not complete across four methods")
+    delta = np.stack([np.stack([cells[(v, m)] for m in methods]) for v in audit["complete_sources"]])
+    held = {m: {} for m in methods}
+    for bag in audit["sel_videos"]:
+        source, method = bag["source"], bag["method"]
+        if source not in audit["splits"]["sel"] or source in held[method]:
+            raise ProtocolError("Duplicate or non-D_sel video-mean validation cell")
+        held[method][source] = difference(bag)[None, :]
+    return delta, held
+
+
+def video_real_controls(audit, lookup):
+    """A full real mean for shuffling, and a nontrivial two-bag real-only control."""
+    means, contrasts = [], []
+    for source in audit["complete_sources"]:
+        rows = sorted(audit["real_frames"]["fit"][source], key=lambda row: row["frame"])
+        values = np.stack([lookup[row["path"]] for row in rows])
+        if len(values) < 2:
+            raise ProtocolError("Real-only video-mean control requires at least two frames")
+        first, second = np.array_split(values, 2)
+        means.append(values.mean(axis=0))
+        contrasts.append(first.mean(axis=0) - second.mean(axis=0))
+    return np.stack(means), np.stack(contrasts)
+
+
 def run_s0(audit_path, cache_path, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
@@ -47,30 +88,35 @@ def run_s0(audit_path, cache_path, output):
               "protocol": protocol(), "local_execution": False}
     try:
         audit = load_audit(audit_path)
+        statistic_mode = audit.get("statistic_mode", "paired_frame")
+        settings = protocol(statistic_mode)
+        video_mode = statistic_mode == "video_mean"
+        report.update(protocol=settings, statistic_mode=statistic_mode)
         arrays, metadata, lookup = load_cache(cache_path, audit)
         fit_real, sel_real = _real_groups(audit, lookup, "fit"), _real_groups(audit, lookup, "sel")
         tau, tau_table = choose_tau(fit_real, sel_real)
         mu, covariance, temporal = real_statistics(fit_real, tau)
-        delta, held = paired_features(audit, lookup)
+        delta, held = (video_mean_features if video_mode else paired_features)(audit, lookup)
         B, _, d7 = decompose(delta)
         dc = second_moment(arrays["compression_deltas"])
-        family = "B" if d7["rho"]["resid"] < .8 else "Fisher"
+        family = "B" if video_mode or d7["rho"]["resid"] < .8 else "Fisher"
         report.update(P_D7={"passed": True, "N4": audit["N4"], "Ncell": audit["Ncell"],
                             "K_pair": audit["K_pair"]}, tau_R=tau, tau_selection=tau_table,
-                      D7={**d7, "passed": family == "B"}, family=family,
+                      D7={**d7, "passed": None if video_mode else family == "B",
+                          "status": "DESCRIPTIVE_VIDEO_MEAN_FOUR_PART" if video_mode else "PAIRED_FRAME_FIVE_PART"}, family=family,
                       audit_sha256=audit["audit_sha256"], feature_identity=metadata,
                       cache_sha256=file_digest(cache_path))
         # Fisher calls the same nested procedure on Fisher-specific statistics
         # in every two/three-method fold, never inheriting a B-subspace D1 pass.
         try:
-            space, d1 = nested_d1(delta, covariance, dc, held, family)
+            space, d1 = nested_d1(delta, covariance, dc, held, family, settings)
         except FisherRequired as exc:
-            if family == "Fisher":
+            if video_mode or family == "Fisher":
                 raise
             report["numeric_fisher_trigger"] = str(exc)
             family = "Fisher"
             report["family"] = family
-            space, d1 = nested_d1(delta, covariance, dc, held, family)
+            space, d1 = nested_d1(delta, covariance, dc, held, family, settings)
         rank = d1["final_rank"]
         d2 = overlap(space, temporal, rank, "D2_temporal")
         d8 = {}
@@ -89,7 +135,9 @@ def run_s0(audit_path, cache_path, output):
                       D3={"status": "DESCRIPTIVE_ONLY", "R3_enabled": False},
                       D4={"status": "NOT_RUN", "note": "Non-gating gap-statistic diagnostic"},
                       B_top32_effective_rank=effective_rank,
-                      full_mechanism_eligible=bool(family == "B" and d1["passed"] and d2["passed"]),
+                      full_mechanism_eligible=bool(not video_mode and family == "B" and d1["passed"] and d2["passed"]),
+                      claim_scope="video-average differences; no framewise cancellation or original D7 mechanism claim" if video_mode
+                                  else "legacy paired-frame differences",
                       claim_status="S1/S2/S3 not yet evaluated; no mechanism conclusion",
                       numeric_diagnostics=space.diagnostics)
         model = {"mu": mu, "white": inverse_sqrt(covariance), "transform": space.transform,
@@ -97,20 +145,23 @@ def run_s0(audit_path, cache_path, output):
         # Controls share Sigma_R, D_nuis, r and the v coordinates. Only the
         # direction source/spectrum changes. QR is used solely to generate the
         # random orthogonal control, never to replace the fitted metric.
-        rng = np.random.default_rng(protocol()["seed"])
+        rng = np.random.default_rng(settings["seed"])
         random_basis, _ = np.linalg.qr(rng.normal(size=(len(mu), rank)), mode="reduced")
         model.update(C_random_V=random_basis, C_random_w=rng.permutation(space.weights[:rank]))
-        real_by_source = {}
-        for row in audit["fit_pairs"]:
-            if row["method"] == protocol()["methods"][0]:
-                real_by_source.setdefault(row["source"], {})[row["frame"]] = lookup[row["real_path"]]
-        real_tensor = np.stack([np.stack([x for _, x in sorted(real_by_source[v].items())])
-                                for v in audit["complete_sources"]])
+        if video_mode:
+            real_tensor, real_difference = video_real_controls(audit, lookup)
+        else:
+            real_by_source = {}
+            for row in audit["fit_pairs"]:
+                if row["method"] == settings["methods"][0]:
+                    real_by_source.setdefault(row["source"], {})[row["frame"]] = lookup[row["real_path"]]
+            real_tensor = np.stack([np.stack([x for _, x in sorted(real_by_source[v].items())])
+                                    for v in audit["complete_sources"]])
+            real_difference = real_tensor - np.roll(real_tensor, 1, axis=1)
         order = rng.permutation(len(real_tensor))
         permutation = np.empty(len(order), dtype=int)
         permutation[order] = np.roll(order, 1)
         shuffled = delta + real_tensor[:, None] - real_tensor[permutation, None]
-        real_difference = real_tensor - np.roll(real_tensor, 1, axis=1)
         numerators = {"C_shuffle": second_moment(shuffled), "C_real": second_moment(real_difference)}
         if family == "Fisher":
             numerators["C_shuffle"] = decompose(shuffled)[1]["method"]
@@ -127,7 +178,8 @@ def run_s0(audit_path, cache_path, output):
         if family == "Fisher":
             omitted_controls["C_real"] = "Undefined method-mean numerator for real-only Fisher control"
         report["omitted_controls"] = omitted_controls
-        identity = {"audit_sha256": audit["audit_sha256"], "protocol_sha256": digest(protocol()),
+        identity = {"audit_sha256": audit["audit_sha256"], "protocol_sha256": digest(settings),
+                    "statistic_mode": statistic_mode,
                     "metric_implementation_sha256": implementation_digest("metric"),
                     "feature_identity": metadata, "status": status, "family": family,
                     "rank": rank, "lambda_m": d1["final_lambda_m"], "tau_R": tau,
@@ -146,7 +198,7 @@ def load_metric(path):
     with np.load(path, allow_pickle=False) as arrays:
         model = {key: arrays[key] for key in arrays.files if key != "metadata"}
         identity = json.loads(str(arrays["metadata"]))
-    if identity["protocol_sha256"] != digest(protocol()):
+    if identity["protocol_sha256"] != digest(protocol(identity.get("statistic_mode", "paired_frame"))):
         raise ProtocolError("Metric protocol is obsolete")
     if identity.get("metric_implementation_sha256") != implementation_digest("metric"):
         raise ProtocolError("Metric implementation changed; refit rather than reuse obsolete results")
@@ -181,9 +233,15 @@ def calibrate(audit_path, cache_path, metric_path, config, checkpoint, clip, out
     if cache_metadata != identity["feature_identity"]:
         raise ProtocolError("Metric and selection cache differ")
     real_groups = _real_groups(audit, lookup, "sel")
-    fake_groups = [np.stack([lookup[row["fake_path"]] for row in audit["sel_pairs"]
-                            if row["video_id"] == video])
-                   for video in sorted({r["video_id"] for r in audit["sel_pairs"]})]
+    if audit.get("statistic_mode") == "video_mean":
+        fake_groups = [np.stack([lookup[row["fake_path"]] for row in bag["frames"]])
+                       for bag in audit["sel_videos"]]
+    else:
+        fake_groups = [np.stack([lookup[row["fake_path"]] for row in audit["sel_pairs"]
+                                if row["video_id"] == video])
+                       for video in sorted({r["video_id"] for r in audit["sel_pairs"]})]
+    if not fake_groups:
+        raise ProtocolError("No D_sel fake videos are available for gamma selection")
     table = []
     for gamma in protocol()["gamma"]:
         real = [score(x, model, gamma)["D_J"].mean() for x in real_groups]

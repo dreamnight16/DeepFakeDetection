@@ -15,7 +15,8 @@ from .protocol import digest, implementation_digest, protocol
 def load_audit(path):
     value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     identity = value.pop("audit_sha256")
-    if digest(value) != identity or value["protocol_sha256"] != digest(protocol()):
+    settings = protocol(value.get("statistic_mode", "paired_frame"))
+    if digest(value) != identity or value["protocol_sha256"] != digest(settings):
         raise ValueError("Audit content/protocol changed; rerun the audit")
     value["audit_sha256"] = identity
     if not value["P_D7_pass"]:
@@ -130,6 +131,7 @@ def transformed(rgb, name):
 
 def extract(audit_path, config, checkpoint, clip, output, *, device="cuda:0", batch_size=8, d8=False):
     audit = load_audit(audit_path)
+    settings = protocol(audit.get("statistic_mode", "paired_frame"))
     root = audit["data_root"]
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -140,12 +142,14 @@ def extract(audit_path, config, checkpoint, clip, output, *, device="cuda:0", ba
     real_rows = [row for split in ("fit", "sel", "rad")
                  for rows in audit["real_frames"][split].values() for row in rows]
     pairs = [*audit["fit_pairs"], *audit["sel_pairs"]]
+    video_paths = {row["fake_path"] for bag in [*audit.get("fit_videos", []), *audit.get("sel_videos", [])]
+                   for row in bag["frames"]}
     paths = sorted({r["path"] for r in real_rows} |
-                   {r[key] for r in pairs for key in ("real_path", "fake_path")})
+                   {r[key] for r in pairs for key in ("real_path", "fake_path")} | video_paths)
     z = extractor.encode(read_rgb(root, path) for path in paths)
     lookup = {path: vector for path, vector in zip(paths, z)}
     fit_rows = [(source, row) for source, rows in audit["real_frames"]["fit"].items() for row in rows]
-    q = protocol()["jpeg_quality"]
+    q = settings["jpeg_quality"]
     # Q is every valid (real fit source, selected frame, quality) combination.
     # A decode/transform failure is fatal; no quality or frame is dropped silently.
     compressed = extractor.encode(jpeg_roundtrip(read_rgb(root, row["path"]), quality)
@@ -175,7 +179,7 @@ def load_cache(cache_path, audit):
         values = {key: arrays[key] for key in arrays.files}
     metadata = json.loads(str(values.pop("metadata")))
     if (metadata["audit_sha256"] != audit["audit_sha256"]
-            or metadata["protocol_sha256"] != digest(protocol())):
+            or metadata["protocol_sha256"] != digest(protocol(audit.get("statistic_mode", "paired_frame")))):
         raise ValueError("Feature cache does not match the frozen audit/protocol")
     if metadata.get("feature_implementation_sha256") != implementation_digest("feature"):
         raise ValueError("Feature implementation changed; cached coordinates are obsolete")

@@ -1,12 +1,12 @@
-"""Frozen E1111A choices, approved before any experiment results."""
+"""Registered E1111A choices and the explicit independent-video-mean revision."""
 
 import hashlib
 import json
 from pathlib import Path
 
 
-def protocol():
-    return {
+def protocol(statistic_mode="paired_frame"):
+    settings = {
         "experiment": "E1111", "branch": "E1111A", "version": "v4.4.3",
         "seed": 1024, "feature_dim": 1024, "candidate_frames": 32,
         "split_counts": {"fit": 395, "rad": 72, "sel": 58, "beta": 57, "theta": 137},
@@ -36,6 +36,29 @@ def protocol():
         "pairing_source": "FF++ official target_source metadata and exact saved frame intersection; no G21 background-pixel acceptance gate",
         "execution": "local source/static checks only; all data/model execution on server",
     }
+    if statistic_mode == "paired_frame":
+        return settings
+    if statistic_mode != "video_mean":
+        raise ValueError(f"Unknown statistic mode: {statistic_mode}")
+    settings.update(
+        version="E1111A-video-mean-v1", parent_protocol="v4.4.3",
+        statistic_mode="video_mean",
+        difference="mean(fake video features) - mean(reference real video features); each video independently samples at most 32 frames",
+        weighting="one equal-weight mean difference per complete source and method; no frame-count weighting",
+        minimum_video_frames=2,
+        D7="exact four-part video-mean decomposition; descriptive, no frame residual or 0.8 gate",
+        S0="input availability and nested video-mean D1 must pass; numeric failures stop; D2/D8 remain diagnostics",
+        fisher="disabled in video_mean: the original frame-residual denominator is unavailable; numeric recovery exhaustion stops S0",
+        controls="fixed Sigma_R/D_nuis/r; random basis+spectrum shuffle, deranged real-video means, chronological two-half real-video mean differences",
+        P_D7={"min_complete_sources": 30, "min_complete_fraction": .5,
+              "min_cell_coverage": .9, "unverified": "stop before S0/S1",
+              "unit": "source x method with at least 2 readable frames in each real/fake video; no common-frame requirement"},
+        K_pair="not used; independent video frame counts are retained and reported",
+        pairing_source="FF++ official target_source lineage only; independent existing frame sets, no temporal alignment claim",
+        crop_scope="independent crops and time coverage may affect video means; no framewise-cancellation or original D7 mechanism claim",
+    )
+    settings.pop("fisher_ranks")
+    return settings
 
 
 def digest(value):

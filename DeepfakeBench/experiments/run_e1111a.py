@@ -24,6 +24,8 @@ def build_parser():
     parser.add_argument("--rgb_root", type=Path)
     parser.add_argument("--clip_pretrained_path", type=Path)
     parser.add_argument("--pair_map", type=Path)
+    parser.add_argument("--statistic_mode", "--statistic-mode", choices=("video_mean", "paired_frame"),
+                        default="video_mean", help="Video-mean method revision, or the legacy exact-frame protocol")
     parser.add_argument("--output_dir", type=Path, default=ROOT / "experiment_results/E1111/E1111A")
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -35,6 +37,8 @@ def build_parser():
         child = stages.add_parser(name)
         child.add_argument("--dataset-json", type=Path, default=ROOT / "preprocessing/dataset_json/FaceForensics++.json")
         child.add_argument("--output-dir", type=Path, required=True)
+        child.add_argument("--statistic-mode", "--statistic_mode", choices=("video_mean", "paired_frame"),
+                           default=argparse.SUPPRESS)
         if name in ("inventory", "index-pairing"):
             child.add_argument("--data-root", type=Path, help="Use the same crop files via a normalized index view")
         if name == "audit":
@@ -86,7 +90,7 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.dry_run:
-        print(json.dumps(protocol(), ensure_ascii=False, indent=2))
+        print(json.dumps(protocol(args.statistic_mode), ensure_ascii=False, indent=2))
         return 0
     try:
         if args.stage is None:
@@ -94,13 +98,16 @@ def main(argv=None):
             result = run(args)
         elif args.stage == "inventory":
             from e1111.audit import inventory
-            result = inventory(args.dataset_json, args.output_dir, data_root=args.data_root)
+            result = inventory(args.dataset_json, args.output_dir, data_root=args.data_root,
+                               statistic_mode=args.statistic_mode)
         elif args.stage == "index-pairing":
             from e1111.audit import index_pairing
-            result = index_pairing(args.dataset_json, args.output_dir, data_root=args.data_root)
+            result = index_pairing(args.dataset_json, args.output_dir, data_root=args.data_root,
+                                   statistic_mode=args.statistic_mode)
         elif args.stage == "audit":
             from e1111.audit import audit
-            result = audit(args.dataset_json, args.data_root, args.pair_map, args.output_dir)
+            result = audit(args.dataset_json, args.data_root, args.pair_map, args.output_dir,
+                           statistic_mode=args.statistic_mode)
         elif args.stage == "extract":
             from e1111.features import extract
             if args.output_dir.exists():

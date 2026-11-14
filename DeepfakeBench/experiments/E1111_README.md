@@ -4,10 +4,21 @@
 
 | 分支 | 基础 | 本轮改变 |
 |---|---|---|
-| E1111A | v4.4.3、冻结 B0 | 同源同帧配对、平衡统计、逐折嵌套选参、后验度量与归因对照 |
+| E1111A | video-mean-v1、冻结 B0 | 同源视频均值差、等权统计、逐折嵌套选参、后验度量与归因对照 |
 | E1111B | E1025 单 LoRA B0/PU | 保留整批 CE，增加可缩小到零的非负 PU 风险正则 |
 
 A、B共用原有DeepfakeBench预处理图片，原版B0作为共同对照；结果目录分别为 experiment_results/E1111/E1111A、experiment_results/E1111/E1111B。每个阶段用新目录，不覆盖历史实验。原 E1025 runner/损失和已有 G21 配对改动保留。
+
+当前默认A为用户于2026-11-14确认的方法修订 **E1111A-video-mean-v1**：每个真假视频独立按原帧号等距取最多32个现有帧，至少2帧；分别平均1024维特征，再按官方谱系求差：
+
+\[
+\Delta_{vm}=\frac1{n_{vm}}\sum_i z^{F}_{vmi}-\frac1{n_v}\sum_j z^{R}_{vj},\qquad
+B_\mu=\frac1{VM}\sum_{v,m}\Delta_{vm}\Delta_{vm}^{\top}.
+\]
+
+不要求真假帧号交集，不强制各视频使用相同帧数。每个源和方法各贡献一个等权均值差，帧多的视频不会占更大权重。核心仍是同源差异引导的方向度量、真实白化、扰动约束及跨方法嵌套D1；输入图片、B0/B训练和既有评分规则不变。旧逐帧模式通过 `--statistic_mode paired_frame` 保留（总调度器用 `--a_statistic_mode paired_frame`）；默认 `video_mean`。两种模式在清单、协议和缓存摘要中区分，旧A缓存不能直接复用。
+
+此修订估计视频平均偏移，会丢失均值相消的逐帧波动能量；姿态、时间覆盖与裁剪分布差异仍可能影响均值。新版不宣称复现原逐帧D7结论，效果须由新版D1和开发源归因验证。
 
 
 ## 搬迁到 /mnt/data2 后的路径
@@ -79,7 +90,7 @@ A不再要求原视频、dlib权重或共享重裁剪，直接读取与B0/B相�
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111b.py \
       > nohup_E1111B.log 2>&1 &
 
-A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++官方谱系与原始帧号配对 → P-D7审计 → 特征提取 → S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
+A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++官方视频谱系映射 → 视频集合可用性审计 → 特征提取 → 视频均值S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
 
 看日志：tail -f nohup_E1111A.log 或 tail -f nohup_E1111B.log。A的all_results.json保存当前阶段和停止原因；每次启动创建独立运行目录。P-D7等科研判据不通过时如实停止，不修改门槛。
 
@@ -89,18 +100,18 @@ A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处�
 
 ## E1111A：预注册执行规则
 
-2026-11-11 在查看实验结果前确定：
+原划分、数值网格及选参规则于2026-11-11确定；2026-11-14观察到输入审计后，用户确认改用视频均值差。以下为修订后的执行定义，不能称为原v4.4.3不变复现：
 
 1. FF++ 官方 train 的719个真实内容源按排序后 seed=1024 打乱，依次分为 fit/rad/sel/beta/theta = 395/72/58/57/137；官方 val 单列开发验证。实际划分保存为 splits.json。
 2. D_sel_FF++ 仅指这58个 FF++ train 源。CDF-v2 real train 的辅助诊断样本不参与 D1、τR、最终λm或配对差估计；CDF-v2 train 作为开发评估源使用。
-3. 每个真实源按数字帧位排序，等距选最多32个不同候选帧；不走旧 loader 的前8帧路径。缺图、坏图、未验证映射单列，禁止复制帧补齐。
-4. 直接使用原有独立对齐的PNG。按[FF++官方命名约定](https://github.com/ondyari/FaceForensics/blob/master/dataset/README.md)将 target_source 的第一个ID作为参考真实源；本仓库预处理保存原始 cnt_frame 作为PNG帧号，仅取真假相同数字帧号的交集，不按列表位置或最近邻配对。每格仍须至少2个有效共同帧，再检查四方法共同帧；不经过G21背景相似度的8帧接受门槛。此核验范围是官方谱系与保存帧号，不声明像素配准或共享仿射。P-D7仍要求N4≥30、N4≥0.5×395（至少198）、Ncell≥0.9，未通过不进入S0/S1。裁剪误差可能混入配对差，但五项经验分解恒等式及其统一权重不变。
-5. 只用完整四方法源，每格统一 K_pair=min(n_v)。主 B、Dm、五项分解共用清单和权重。审计同时报告 K_pair、有效帧丢弃比例、共同帧丢弃比例、缺失格和剔除原因。
+3. 每个真假视频各自按数字帧位排序，等距选最多32个不同候选帧并检查图片可读性；不走旧 loader 的前8帧路径。缺图、坏图、未验证映射单列，禁止复制帧补齐。
+4. 直接使用原有独立对齐的PNG，按[FF++官方命名约定](https://github.com/ondyari/FaceForensics/blob/master/dataset/README.md)将 target_source 的第一个ID作为参考真实源。新版每格要求真实视频和该方法伪造视频各有至少2个有效帧，不要求同帧号。N4现在表示四个方法的视频集合都可用的真实源数，Ncell表示可用视频格比例。保留N4≥30、N4≥0.5×395（至少198）、Ncell≥0.9的数值，但输入单位已变更；不是绕过旧逐帧P-D7而宣称其通过。
+5. 仅完整四方法源参与拟合，每格一个视频均值差。B_mu精确分为均值、方法、视频和交互四项，D7仅报告能量占比与重构误差，不再存在逐帧残差项。K_pair记为null；审计保存每个真假视频的实际帧数和保留帧数，不按全局最少帧数截断。
 6. μR/ΣR/Dc/Dtemporal 仍用全部 D_fit 真实源。Dc 的 Q 为所有有效(真实源,候选帧,JPEG质量)组合，质量固定15/30/40/50，每组合等权；提取时遇到新坏图直接失败。
 7. τR∈{0.1,0.3,0.5}：最小化 D_sel_FF++ 真实视频等权的高斯 NLL，使用与后续白化相同的特征值地板；相差≤1e-12时取小τR。
-8. 原 B 方案 r∈{2,4,8}、λm∈{0,0.1,0.3,1}，λt固定0。外层留m，内层再留j，只用另两法重估 B、Dm、归一化Dm、Dnuis、L、V。最大化三折平均 J=mean(rho_cap/(r/d))；相差≤1e-12时先取小r，再取小λm。外层用其余三法重新拟合后评估m。
+8. B_mu方案 r∈{2,4,8}、λm∈{0,0.1,0.3,1}，λt固定0。外层留m，内层再留j，只用另两法的视频均值差重估 B_mu、Dm、归一化Dm、Dnuis、L、V。留出捕获率也使用每源一个视频均值差，最大化三折平均 J=mean(rho_cap/(r/d))；相差≤1e-12时先取小r，再取小λm。外层用其余三法重新拟合后评估m。
 9. 四个外层秩取较小中位候选。固定最终r后，在四个方法留一折重新计算同一J来选择最终λm，再用四法重拟合；不得回写 D1 外层指标。D1 要求至少三折捕获率>1.5r/d，四折平均的源簇 bootstrap 双侧95%区间下界>平均r/d，1000次、seed1024。
-10. Fisher 降级采用**专用r=1**：两方法内层的Σmethod秩最多1，不沿用 B 的r网格。每个内外层重估 Fisher 分子、残差分母与子空间，重新完成全部D1，阈值仍按该折r/d计算。所有秩不得超过数值正谱秩。Fisher 通过不改写原D7失败，不恢复完整机制主张；之后仍须随机谱归因。
+10. 新版停用原逐帧残差0.8判据及其自动Fisher分支；四项恒等式本身不构成通过证据。S0须输入可用性和新版嵌套D1通过；数值恢复耗尽或零能量则停止，不伪造残差为零。旧paired_frame模式仍保留残差≥0.8时Fisher专用r=1、完整重跑嵌套D1的规则。所有秩均不得超过数值正谱秩。
 11. D1 零分母停止S0；D2/D8 零分母标为未定义、不给通过结论，分别阻止完整机制/R4继续结论。D3当前仅描述、R3关闭，未来启动阈值不参与本轮通过/失败。
 12. S0后扫描γ∈{0,0.25,0.5,1,2,4,8,inf}。用 D_sel_FF++ 真实视频的临时conformal阈值，在α=0.10下最大化伪造视频TPR，并列取小γ；固定后才读取D_theta。四个检测器及各对照分别在D_theta上按相同FPR预算定阈值。
 
@@ -122,12 +133,12 @@ A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处�
       --dataset-json "$DB_JSON/FaceForensics++.json" --data-root "$DB_DATA_ROOT" \
       --output-dir "$E1111_OUT/inventory"
 
-    # 2. 按官方目标源和相同原始帧号生成映射，尚不表示P-D7通过
+    # 2. 默认仅按官方视频谱系建立映射，不要求真假同帧号
     python experiments/run_e1111a.py index-pairing \
       --dataset-json "$E1111_OUT/inventory/dataset.json" \
       --data-root "$DB_DATA_ROOT" --output-dir "$E1111_OUT/index_pairing"
 
-映射与后续图片审计使用同一份索引快照，只选择相同原始帧号，不生成裁剪文件。旧G21内容核验工具保留独立使用，其像素相似度接受结果不再作为A的默认可用样本门槛。
+映射与后续图片审计使用同一份索引快照，新版各视频独立使用原有帧，不生成裁剪文件。复现旧严格模式时，inventory、index-pairing和audit三步均须指定 --statistic-mode paired_frame。旧G21内容核验工具保留独立使用，其像素相似度接受结果不作为A默认可用样本门槛。
 
     python experiments/run_e1111a.py audit \
       --dataset-json "$E1111_OUT/inventory/dataset.json" \
@@ -147,18 +158,18 @@ A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处�
       --audit "$E1111_OUT/audit/audit.json" --cache "$E1111_OUT/features/features.npz" \
       --output-dir "$E1111_OUT/s0"
 
-    # 5. S0/新 Fisher D1 通过后选gamma，再在D_theta定阈值
+    # 5. 新版S0/D1通过后选gamma，再在D_theta定阈值
     python experiments/run_e1111a.py calibrate \
       --audit "$E1111_OUT/audit/audit.json" --cache "$E1111_OUT/features/features.npz" \
       --metric "$E1111_OUT/s0/metric.npz" \
       --base-config "$DB_B0_CONFIG" --checkpoint "$DB_B0" \
       --clip-pretrained-path "$DB_CLIP" --output-dir "$E1111_OUT/calibrated"
 
-S0报告保存五项重构误差、各ρ、D1逐折选参表/拟合方法、bootstrap、D2/D8、有效秩和数值恢复记录。失败状态返回非零，不以NaN继续。D4的gap诊断本次标记 NOT_RUN，不自动引入多中心；它不是S0通过门槛。
+新版S0报告保存四项重构误差、各ρ、D1逐折选参表/拟合方法、bootstrap、D2/D8、有效秩和数值恢复记录；旧模式保留五项报告。失败状态返回非零，不以NaN继续。D4的gap诊断本次标记 NOT_RUN，不自动引入多中心；它不是S0通过门槛。新版不沿用原逐帧完整机制资格。
 
 ### S1归因与后续评估
 
-三个对照：C_random为随机正交方向+谱置换；C_shuffle将真实参考源按固定随机错排重建差分；C_real使用真实同源跨帧差。保持最终真实白化、Dnuis和r不变，仅替换方向来源；对照为与D_F同型的子空间能量，各自校准阈值。正谱秩不足时明确省略，不补任意方向。Fisher的真实方法均值分子不可用，标未定义；继续条件仍要求独立随机谱比较。
+三个对照：C_random为随机正交方向+谱置换；新版C_shuffle将真实视频均值按固定随机错排重建均值差；C_real将每个真实视频按时间顺序分成前后两组，各自平均后求差。保持最终真实白化、Dnuis和r不变，仅替换方向来源；对照为与D_F同型的子空间能量，各自校准阈值。正谱秩不足时明确省略，不补任意方向。旧逐帧模式保留真实跨帧差；其Fisher真实方法均值分子不可用时仍标未定义。
 
     python experiments/run_e1111a.py export \
       --dataset-json "$DB_JSON/FaceForensics++.json" --dataset-id FaceForensics++ --split val \
@@ -217,7 +228,7 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 
 沿用原服务器依赖环境；未增加新的训练框架或第三方依赖。测试已编写，**本机未执行**：
 
-    python -m pytest -q tests/test_e1111a.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py tests/test_e1111_paths.py
+    python -m pytest -q tests/test_e1111a.py tests/test_e1111_video_mean.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py tests/test_e1111_paths.py
     python -m pytest -q tests/test_e1025_pu.py tests/test_e1025_runner.py \
       tests/test_e1025_integration.py tests/g21/test_builder.py tests/g21/test_pairing.py
 
@@ -230,3 +241,5 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 2026-11-13数据协议调整：用户确认A与标准DeepfakeBench共用既有预处理帧。取消的是原视频共享重裁剪条件，不降低同源同帧验证、P-D7、平衡权重或统计阈值。A的裁剪输入与此前严格方案不同，旧A统计缓存按协议/源码摘要失效；B0/B模型及训练、历史8帧指标不受影响。A既定32帧候选采样、本轮评分和选点规则保持不变；对外结果仍须按同一取帧与指标口径比较。
 
 2026-11-14配对入口修复：标准PNG路径误用了旧G21至少8帧的背景核验接受集合。A改为官方谱系与精确保存帧号配对，映射绑定索引摘要，图片可读性及四方法完整度由原审计继续检查。旧运行的N4=1来自额外核验筛选，不能据此判断官方索引的真实可配对量；修复后仍须审计实际N4/Ncell/K_pair，不降低P-D7或改变B0/B。此变更在协议及源码摘要中记录，旧A缓存不可混用。
+
+随后旧逐帧审计得到N4=314、Ncell=1420/1580、K_pair=2，显示标准独立抽帧与严格时间配对存在适配问题。用户确认只使用现有统一输入、保持核心思想后，默认切换为上述video-mean-v1；原停止记录保留。新版可用性审计的数值及实验效果仍待服务器运行，不能用旧审计值代替新版结果。

@@ -27,25 +27,26 @@ def second_moment(values):
 
 def decompose(delta):
     delta = np.asarray(delta, dtype=np.float64)
-    if delta.ndim != 4 or min(delta.shape[:2]) < 2 or delta.shape[2] < 2:
-        raise ProtocolError("Decomposition requires video x method x equal frames x feature")
+    if (delta.ndim not in (3, 4) or min(delta.shape[:2]) < 2
+            or (delta.ndim == 4 and delta.shape[2] < 2)):
+        raise ProtocolError("Decomposition requires video x method x feature, or legacy equal-frame differences")
     B = second_moment(delta)
-    mu = delta.mean(axis=(0, 1, 2))
-    cell = delta.mean(axis=2)
+    cell = delta.mean(axis=2) if delta.ndim == 4 else delta
+    mu = cell.mean(axis=(0, 1))
     method = cell.mean(axis=0) - mu
     video = cell.mean(axis=1) - mu
     interaction = cell - mu - method[None] - video[:, None]
-    residual = delta - cell[:, :, None]
     parts = {"mean": np.outer(mu, mu), "method": second_moment(method),
-             "video": second_moment(video), "inter": second_moment(interaction),
-             "resid": second_moment(residual)}
+             "video": second_moment(video), "inter": second_moment(interaction)}
+    if delta.ndim == 4:
+        parts["resid"] = second_moment(delta - cell[:, :, None])
     trace = float(np.trace(B))
     if trace <= 0:
         raise ProtocolError("tr(B)=0: paired differences have no energy; stop S0")
     error = float(np.linalg.norm(B - sum(parts.values())) / np.linalg.norm(B))
     ratios = {key: float(np.trace(value) / trace) for key, value in parts.items()}
     if error > 1e-10 or abs(sum(ratios.values()) - 1) > 1e-10:
-        raise ProtocolError("Five-component identity failed; check sample weights")
+        raise ProtocolError("Empirical decomposition identity failed; check sample weights")
     return B, parts, {"rho": ratios, "relative_reconstruction_error": error,
                       "rho_sum": sum(ratios.values())}
 
@@ -105,6 +106,8 @@ class Space:
 
 
 def fit_space(delta, covariance, dc, lam, family="B"):
+    if np.ndim(delta) == 3 and family == "Fisher":
+        raise ProtocolError("Video-mean mode has no frame-residual Fisher denominator")
     B, parts, _ = decompose(delta)
     d = len(covariance)
     dc = np.asarray(dc, dtype=np.float64)
@@ -274,7 +277,8 @@ def nested_d1(delta, covariance, dc, sel_deltas, family="B", settings=None):
         "mean_rank_random_baseline": baseline, "final_rank": rank,
         "final_lambda_m": final["lambda_m"], "final_selection": final_candidates,
         "fit_diagnostics": {str(key): value.diagnostics for key, value in spaces.items()},
-        "scope": "method transfer; D_sel_FF++ sources shared across methods",
+        "scope": "video-mean method transfer; D_sel_FF++ sources shared across methods" if np.ndim(delta) == 3
+                 else "method transfer; D_sel_FF++ sources shared across methods",
     }
 
 

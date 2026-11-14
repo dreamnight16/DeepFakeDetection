@@ -46,6 +46,7 @@ runpy.run_path(sys.argv[0], run_name='__main__')
     assert plan["B0_command"][plan["B0_command"].index("--arms") + 1] == "B0"
     assert plan["B"]["command"][plan["B"]["command"].index("--arms") + 1] == "PUCE"
     assert plan["A"]["command"][plan["A"]["command"].index("--device") + 1] == "cuda:0"
+    assert plan["A"]["command"][plan["A"]["command"].index("--statistic_mode") + 1] == "video_mean"
     assert not destination.exists()
 
 

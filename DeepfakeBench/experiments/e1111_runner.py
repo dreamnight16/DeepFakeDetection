@@ -61,7 +61,9 @@ def resolve_inputs(args):
     import yaml
     from e1111.protocol import protocol
 
-    if args.seed != protocol()["seed"]:
+    statistic_mode = getattr(args, "statistic_mode", "video_mean")
+    settings = protocol(statistic_mode)
+    if args.seed != settings["seed"]:
         raise ValueError("This frozen E1111A protocol uses seed=1024")
     source = resolve_source(args)
     config = copy.deepcopy(source["config"])
@@ -96,11 +98,13 @@ def run(args):
     from e1111.pipeline import run_s0, calibrate, score_export, attribution
     from e1111.protocol import protocol
 
+    statistic_mode = getattr(args, "statistic_mode", "video_mean")
+    settings = protocol(statistic_mode)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     output = Path(args.output_dir) / f"seed{args.seed}_{stamp}_{os.getpid()}"
     output.mkdir(parents=True, exist_ok=False)
     manifest = {"experiment": "E1111", "branch": "E1111A", "status": "RUNNING",
-                "stage": "resolve_inputs", "protocol": protocol(), "stages": {},
+                "stage": "resolve_inputs", "protocol": settings, "statistic_mode": statistic_mode, "stages": {},
                 "results_dir": str(output.resolve()),
                 "runner_sha256": file_digest(__file__)}
 
@@ -120,12 +124,13 @@ def run(args):
         return result
 
     print(f"E1111A run: {output.resolve()}", flush=True)
+    print(f"E1111A statistic: {statistic_mode}, protocol={settings['version']}", flush=True)
     save()
     try:
         inputs = resolve_inputs(args)
         source = inputs["source"]
         manifest["base"] = {key: source[key] for key in ("checkpoint", "config_path", "base_sha256", "config_sha256")}
-        manifest["input_preprocessing"] = protocol()["input_preprocessing"]
+        manifest["input_preprocessing"] = settings["input_preprocessing"]
         manifest["rgb_root"] = str(inputs["data_root"])
         config_path = output / "resolved_base_config.json"
         atomic_json(config_path, inputs["config"])
@@ -134,15 +139,17 @@ def run(args):
             save()
             return manifest
         ff_json = inputs["metadata"] / "FaceForensics++.json"
-        indexed = stage("inventory", inventory, ff_json, output / "inventory", data_root=inputs["data_root"])
+        indexed = stage("inventory", inventory, ff_json, output / "inventory", data_root=inputs["data_root"],
+                        statistic_mode=statistic_mode)
         ff_index = Path(indexed["dataset_json"])
         if args.pair_map:
             pair_map = args.pair_map
         else:
             stage("index_pairing", index_pairing, ff_index, output / "index_pairing",
-                  data_root=inputs["data_root"])
+                  data_root=inputs["data_root"], statistic_mode=statistic_mode)
             pair_map = output / "index_pairing/pair_map.json"
-        audited = stage("audit", audit, ff_index, inputs["data_root"], pair_map, output / "audit")
+        audited = stage("audit", audit, ff_index, inputs["data_root"], pair_map, output / "audit",
+                        statistic_mode=statistic_mode)
         if not audited["P_D7_pass"]:
             manifest.update(status=audited["status"], stage="audit")
             save()
