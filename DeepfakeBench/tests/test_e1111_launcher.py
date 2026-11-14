@@ -135,7 +135,7 @@ def test_one_baseline_then_correct_gpu_schedule_and_independent_completion(
                 assert ("A" in finished) is (not separate_gpus)
             folder = Path(command[command.index("--output_dir") + 1]) / "seed_fixture"
             folder.mkdir(parents=True)
-            report = {"status": "S0_PAUSED_P_D7" if a_exit_code else "DEVELOPMENT_COMPLETE"} if self.name == "A" else {
+            report = {"status": "S0_PAUSED_P_D7" if a_exit_code else "COMPLETE"} if self.name == "A" else {
                 "arms": {"B0" if self.name == "B0" else "PUCE_P0.3_L0.01": {"status": "OK"}}}
             (folder / "all_results.json").write_text(json.dumps(report))
             if self.name == "A":
@@ -174,7 +174,7 @@ def test_reuse_never_starts_another_baseline(launcher, tmp_path, monkeypatch):
             folder = Path(command[command.index("--output_dir") + 1]) / "seed_fixture"
             folder.mkdir(parents=True)
             report = {"arms": {"CE_L0": {"status": "OK"}}} if "--arms" in command else {
-                "status": "DEVELOPMENT_COMPLETE"}
+                "status": "COMPLETE"}
             (folder / "all_results.json").write_text(json.dumps(report))
 
         def poll(self):

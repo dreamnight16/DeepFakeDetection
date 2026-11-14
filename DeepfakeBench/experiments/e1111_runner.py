@@ -60,6 +60,7 @@ def resolve_source(args):
 def resolve_inputs(args):
     import yaml
     from e1111.protocol import protocol
+    from run_g25 import TEST_DS
 
     statistic_mode = getattr(args, "statistic_mode", "video_mean")
     settings = protocol(statistic_mode)
@@ -79,7 +80,7 @@ def resolve_inputs(args):
     data_root = Path(args.rgb_root or config.get("rgb_root_override", "/home/user1/effort/data"))
     clip = Path(args.clip_pretrained_path or config.get(
         "clip_pretrained_path", ROOT / "training/models--openai--clip-vit-large-patch14"))
-    for path in (metadata / "FaceForensics++.json", metadata / "Celeb-DF-v2.json"):
+    for path in (metadata / f"{name}.json" for name in TEST_DS):
         if not path.is_file():
             raise FileNotFoundError(f"Required E1111A input is missing: {path}")
     for path in (data_root, clip):
@@ -97,6 +98,7 @@ def run(args):
     from e1111.features import extract, export_dataset, load_cache
     from e1111.pipeline import run_s0, calibrate, score_export, attribution
     from e1111.protocol import protocol
+    from e1111.benchmark import evaluate
 
     statistic_mode = getattr(args, "statistic_mode", "video_mean")
     settings = protocol(statistic_mode)
@@ -191,9 +193,18 @@ def run(args):
             stage(f"{tag}_scores", score_export, destination / "features.npz", metric_path, scores)
             evaluations.append(scores)
         attribution_result = stage("attribution", attribution, evaluations, output / "attribution")
-        manifest.update(status="DEVELOPMENT_COMPLETE" if attribution_result["passed"] else "S1_FAILED",
+        native = Path(source["config_path"]).parent
+        benchmark = stage("benchmark", evaluate, metric_path, config_path, source["checkpoint"], inputs["clip"],
+                          native / "eval_config.json", output / "benchmark8", device=args.device,
+                          reference_exports=native / "exports" if (native / "exports").is_dir() else None)
+        for key in ("datasets", "metric_protocol", "primary_detector", "independent_datasets",
+                    "video_auc_seven_mean_fullpath", "independent_video_auc_mean_fullpath",
+                    "frame_auc_seven_mean", "independent_frame_auc_mean"):
+            manifest[key] = benchmark[key]
+        manifest["benchmark_results"] = str(output / "benchmark8/all_results.json")
+        manifest.update(status="COMPLETE" if attribution_result["passed"] else "S1_FAILED",
                         stage="complete", results_dir=str(output.resolve()),
-                        claim_status="development experiment; S3 identity audit and formal blind tests remain separate")
+                        claim_status="unified native-test benchmark complete; CDF-v2 inherits B0 selection exposure; no full-mechanism claim")
     except Exception as exc:
         manifest.update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
         print(f"E1111A/{manifest['stage']}: {manifest['error']}", flush=True)

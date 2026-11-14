@@ -18,7 +18,7 @@ B_\mu=\frac1{VM}\sum_{v,m}\Delta_{vm}\Delta_{vm}^{\top}.
 
 不要求真假帧号交集，不强制各视频使用相同帧数。每个源和方法各贡献一个等权均值差，帧多的视频不会占更大权重。核心仍是同源差异引导的方向度量、真实白化、扰动约束及跨方法嵌套D1；输入图片、B0/B训练和既有评分规则不变。旧逐帧模式通过 `--statistic_mode paired_frame` 保留（总调度器用 `--a_statistic_mode paired_frame`）；默认 `video_mean`。两种模式在清单、协议和缓存摘要中区分，旧A缓存不能直接复用。
 
-此修订估计视频平均偏移，会丢失均值相消的逐帧波动能量；姿态、时间覆盖与裁剪分布差异仍可能影响均值。新版不宣称复现原逐帧D7结论，效果须由新版D1和开发源归因验证。
+此修订估计视频平均偏移，会丢失均值相消的逐帧波动能量；姿态、时间覆盖与裁剪分布差异仍可能影响均值。新版不宣称复现原逐帧D7结论，效果须由新版D1、开发源归因和统一基准评测验证。内部拟合/开发诊断最多32帧，最终主对照评测使用B0/B原生8帧协议。
 
 
 ## 搬迁到 /mnt/data2 后的路径
@@ -90,7 +90,7 @@ A不再要求原视频、dlib权重或共享重裁剪，直接读取与B0/B相�
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111b.py \
       > nohup_E1111B.log 2>&1 &
 
-A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++官方视频谱系映射 → 视频集合可用性审计 → 特征提取 → 视频均值S0 → 校准 → 两个开发源导出/归因。无需人工制作配对文件或修改“已验证”字段。它不会从头训练骨干，也不会自动运行盲测。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
+A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++官方视频谱系映射 → 视频集合可用性审计 → 特征提取 → 视频均值S0 → 校准 → 两个开发源导出/归因 → 原生8帧统一基准评测。无需人工制作配对文件或修改“已验证”字段，不从头训练骨干。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
 
 看日志：tail -f nohup_E1111A.log 或 tail -f nohup_E1111B.log。A的all_results.json保存当前阶段和停止原因；每次启动创建独立运行目录。P-D7等科研判据不通过时如实停止，不修改门槛。
 
@@ -98,7 +98,7 @@ A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++�
 
 A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处理图片；不生成新的裁剪目录，也不改变原JSON或PNG。原视频已删除不影响这一路径。对于绝对路径或带./的索引，程序仅生成指向同一文件的内部相对路径视图，保持帧列表顺序和样本成员不变；不会借此换图或放宽配对条件。
 
-训练结束后，终端会打印该次运行目录下的all_results.json。A可将**该次新运行目录**作为 --base_run；程序只接受成功的原生B0、读取B0/train_config.json并校验checkpoint SHA，不会误取PUCE权重。早期示例中的E0924路径仅用于旧B0复现；需要新B0时改用新运行目录。B0历史对照仍使用8帧评估；A的32帧统计结果单列，不与其直接混算。
+训练结束后，终端会打印该次运行目录下的all_results.json。A可将**该次新运行目录**作为 --base_run；程序只接受成功的原生B0、读取B0/train_config.json并校验checkpoint SHA，不会误取PUCE权重。早期示例中的E0924路径仅用于旧B0复现；需要新B0时改用新运行目录。正式对照查看A的benchmark8/all_results.json及主结果中的datasets；32帧开发诊断在dev_ff/dev_cdf目录单列。
 
 ## E1111A：预注册执行规则
 
@@ -199,7 +199,22 @@ S1对两个开发源等权平均TPR，配对、按源簇及数据集分层bootst
 
 S2同时报告TPR(γ)曲线、内点/端点最优和独立D1。**ρcap不含γ，不会随γ改善**，因此不实现原决策文档中将其要求为γ单调函数的矛盾判据。S3身份混杂仍需ArcFace/匹配子集证据；结果保持 NOT_EVALUATED，不能据S1自动宣称完整机制。
 
-完成S3/S4研究判定并冻结后，可用同一export/score接口评估 DeepFakeDetection、DFDC、DFDCP、UADFV 的官方test，CDF-v2 test单列seen-source。主流程不自动运行盲测。n<50只报AUC；50≤n<100仅报α=0.10；n≥100报0.10/0.05，FPR均带Clopper–Pearson区间。DFDCP无假样本时仅覆盖率/FPR。历史选点checkpoint的结果标为开发性；正式主张仍需干净checkpoint。
+原export/score接口的32帧测试保留为补充诊断；其低FPR统计不替代下面统一8帧的AUC主对照。n<50只报AUC；50≤n<100仅报α=0.10；n≥100报0.10/0.05，FPR带Clopper–Pearson区间。历史选点checkpoint继承CDF-v2暴露，不能称为全新未见源的干净盲测。
+
+### 与B0/B统一的正式对照指标
+
+主流程使用B0保存的原始eval_config.json、同一get_data_loader(test)、strict_loader以及seed=1024；逐视频实际选中的8帧、读图、resize和归一化都由原loader决定，不另写一套“等距8帧”。测试集与B0/B完全相同：WDF、FFIW、Celeb-DF-v2、DeepFakeDetection、DFDC、DFDCP、DeeperForensics-1.0，加FF++。
+
+一次骨干前向同时计算原生B0分类头分数和A的patch均值特征，再应用冻结的度量/γ。若存在B0历史exports，逐库核对labels、path、video_id及B0概率/log-odds；不一致就停止。不存在历史导出时明确记录为同checkpoint新重放。测试集不参与秩、λ、τ、γ或分数方向选择。
+
+统一复用readout_metrics，报告frame_auc、video_auc/video_auc_fullpath、video_auc_legacy、样本数和历史分组冲突；视频分数均为逐帧原始分数算术平均，不给A能量加sigmoid。主结果datasets使用预先固定的D_J，另列D_R/D_F/D_P和可用对照、同帧B0结果。七库均值及排除CDF-v2的独立六库均值与B0/B口径相同，FF++单列。A的accuracy仅为冻结32帧D_theta视频阈值下的参考帧准确率，不宣称统一8帧低FPR工作点；主对照使用AUC。
+
+已经完成校准的旧A运行，无需重训、重拟合或重提拟合特征，可以单独补跑统一测试：
+
+    CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111a.py benchmark --latest \
+      > nohup_E1111A_benchmark.log 2>&1 &
+
+--latest在默认E1111A目录中选择时间最新且已有calibrated_metric.npz的运行；也可用 --run-dir 指定确切运行。补测结果保存到该运行的新benchmark8_时间戳目录；新启动的完整A流程默认保存到benchmark8目录，并将主AUC汇总到all_results.json。开发归因失败仍保留S1_FAILED状态及统一测试结果，不据测试指标改变研究判定。
 
 ## E1111B：CE + 小权重 PU 正则
 
@@ -230,7 +245,7 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 
 沿用原服务器依赖环境；未增加新的训练框架或第三方依赖。测试已编写，**本机未执行**：
 
-    python -m pytest -q tests/test_e1111a.py tests/test_e1111_video_mean.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py tests/test_e1111_paths.py
+    python -m pytest -q tests/test_e1111a.py tests/test_e1111_video_mean.py tests/test_e1111_benchmark.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py tests/test_e1111_paths.py
     python -m pytest -q tests/test_e1025_pu.py tests/test_e1025_runner.py \
       tests/test_e1025_integration.py tests/g21/test_builder.py tests/g21/test_pairing.py
 

@@ -300,7 +300,7 @@ def run(args):
                         "OK" if arms and all(value == "OK" for value in arms.values()) else "FAILED")
                 else:
                     state["jobs"][name]["experiment_status"] = report.get("status")
-                expected = "DEVELOPMENT_COMPLETE" if name == "A" else "OK"
+                expected = "COMPLETE" if name == "A" else "OK"
                 state["jobs"][name]["result_valid"] = (
                     state["jobs"][name]["experiment_status"] == expected)
                 if not state["jobs"][name]["result_valid"]:

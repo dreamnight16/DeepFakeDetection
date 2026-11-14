@@ -96,10 +96,11 @@ def load_runner(monkeypatch):
 
 def test_standard_inputs_require_no_original_videos_or_predictor(tmp_path, monkeypatch):
     runner = load_runner(monkeypatch)
+    from run_g25 import TEST_DS
     root, metadata, clip = (tmp_path / name for name in ("images", "metadata", "clip"))
     for path in (root, metadata, clip):
         path.mkdir()
-    for name in ("FaceForensics++", "Celeb-DF-v2"):
+    for name in TEST_DS:
         (metadata / f"{name}.json").write_text("{}")
     source = {"config": {"label_dict": {}, "dataset_json_folder": str(metadata),
                          "rgb_root_override": str(root), "clip_pretrained_path": str(clip)}}
@@ -115,7 +116,7 @@ def test_standard_inputs_require_no_original_videos_or_predictor(tmp_path, monke
 @pytest.mark.parametrize("gate_pass", [False, True])
 @pytest.mark.parametrize("reuse_cache,cache_identity_ok", [(False, True), (True, True), (True, False)])
 def test_full_runner_respects_gate_and_validated_feature_reuse(tmp_path, monkeypatch, gate_pass, reuse_cache, cache_identity_ok, capsys):
-    from e1111 import audit, features, pipeline
+    from e1111 import audit, features, pipeline, benchmark
     from g21.io import file_digest
 
     runner = load_runner(monkeypatch)
@@ -155,6 +156,11 @@ def test_full_runner_respects_gate_and_validated_feature_reuse(tmp_path, monkeyp
     monkeypatch.setattr(features, "export_dataset", record("export", {}))
     monkeypatch.setattr(pipeline, "score_export", record("score", {}))
     monkeypatch.setattr(pipeline, "attribution", record("attribution", {"passed": True}))
+    monkeypatch.setattr(benchmark, "evaluate", record("benchmark", {
+        "status": "OK", "datasets": {}, "metric_protocol": "full-path video_id; frame mean",
+        "primary_detector": "D_J", "independent_datasets": [], "video_auc_seven_mean_fullpath": .6,
+        "independent_video_auc_mean_fullpath": .6, "frame_auc_seven_mean": .6,
+        "independent_frame_auc_mean": .6}))
     args = argparse.Namespace(output_dir=tmp_path / "run", seed=1024, preflight=False,
                               pair_map=None, device="cpu", batch_size=8, skip_d8=False,
                               feature_cache=tmp_path / "previous.npz" if reuse_cache else None)
@@ -169,8 +175,9 @@ def test_full_runner_respects_gate_and_validated_feature_reuse(tmp_path, monkeyp
         assert "E1111A/features: ValueError" in capsys.readouterr().out
     else:
         assert calls == ["inventory", "pairing", "audit", "cache" if reuse_cache else "features", "s0", "calibrate",
-                         "export", "score", "export", "score", "attribution"]
-        assert result["status"] == "DEVELOPMENT_COMPLETE"
+                         "export", "score", "export", "score", "attribution", "benchmark"]
+        assert result["status"] == "COMPLETE"
+        assert result["video_auc_seven_mean_fullpath"] == .6
 
 
 def test_a_accepts_successful_native_e1111_b0_without_using_the_old_checkpoint(tmp_path, monkeypatch):

@@ -79,6 +79,11 @@ def build_parser():
     child = stages.add_parser("attribution")
     child.add_argument("--evaluations", nargs="+", type=Path, required=True)
     child.add_argument("--output-dir", type=Path, required=True)
+    child = stages.add_parser("benchmark", help="Native B0/B 8-frame test protocol on an already calibrated A run")
+    child.add_argument("--run-dir", type=Path, default=ROOT / "experiment_results/E1111/E1111A")
+    child.add_argument("--latest", action="store_true", help="Use the latest run containing a calibrated metric")
+    child.add_argument("--output-dir", type=Path)
+    child.add_argument("--device", default="cuda:0")
     child = stages.add_parser("prepare", help="Legacy shared-crop experiment, not part of the normal A run")
     child.add_argument("--dataset-json", type=Path, default=ROOT / "preprocessing/dataset_json/FaceForensics++.json")
     child.add_argument("--pair-map", type=Path, required=True)
@@ -138,6 +143,9 @@ def main(argv=None):
         elif args.stage == "attribution":
             from e1111.pipeline import attribution
             result = attribution(args.evaluations, args.output_dir)
+        elif args.stage == "benchmark":
+            from e1111.benchmark import evaluate_run
+            result = evaluate_run(args.run_dir, args.output_dir, latest=args.latest, device=args.device)
         else:
             from e1111.shared_crop import prepare
             result = prepare(args.dataset_json, args.pair_map, args.raw_root, args.predictor_path, args.output_dir)
