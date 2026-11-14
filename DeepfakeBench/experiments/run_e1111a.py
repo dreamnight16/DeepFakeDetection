@@ -24,6 +24,7 @@ def build_parser():
     parser.add_argument("--rgb_root", type=Path)
     parser.add_argument("--clip_pretrained_path", type=Path)
     parser.add_argument("--pair_map", type=Path)
+    parser.add_argument("--feature_cache", type=Path, help="Reuse an existing cache after audit, B0 and configuration identity checks")
     parser.add_argument("--statistic_mode", "--statistic-mode", choices=("video_mean", "paired_frame"),
                         default="video_mean", help="Video-mean method revision, or the legacy exact-frame protocol")
     parser.add_argument("--output_dir", type=Path, default=ROOT / "experiment_results/E1111/E1111A")

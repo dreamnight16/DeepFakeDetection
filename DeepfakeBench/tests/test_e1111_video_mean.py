@@ -111,6 +111,8 @@ def test_video_mean_d1_refits_and_outer_holdout_does_not_choose_its_parameters()
     held = {m: {str(v): rng.normal(size=(1, 6)) for v in range(6)} for m in methods}
     settings = {**protocol("video_mean"), "ranks": [1, 2], "lambda_m": [0., .1], "bootstrap_repeats": 20}
     _, first = nested_d1(delta, np.eye(6), np.eye(6), held, settings=settings)
+    json.dumps(first, allow_nan=False)
+    assert all(type(row["Dc_floor_dominated"]) is bool for row in first["fit_diagnostics"].values())
     altered = {**held, methods[0]: {v: value + 100 for v, value in held[methods[0]].items()}}
     _, second = nested_d1(delta, np.eye(6), np.eye(6), altered, settings=settings)
     assert first["inner_selection"][methods[0]] == second["inner_selection"][methods[0]]

@@ -120,6 +120,8 @@ def test_nested_refits_exclude_both_methods_and_outer_holdout_cannot_choose_its_
     held = {m: {str(v): rng.normal(size=(3, 6)) for v in range(6)} for m in methods}
     settings = {**protocol(), "ranks": [1, 2], "lambda_m": [0., .1], "bootstrap_repeats": 30}
     _, result = nested_d1(delta, np.eye(6), np.eye(6), held, family, settings)
+    json.dumps(result, allow_nan=False)
+    assert all(type(row["Dc_floor_dominated"]) is bool for row in result["fit_diagnostics"].values())
     for outer_method, rows in result["inner_selection"].items():
         for candidate in rows:
             for fold in candidate["inner"]:

@@ -157,7 +157,7 @@ def fit_space(delta, covariance, dc, lam, family="B"):
     weights = np.minimum(np.where(eigenvalues > tolerance, eigenvalues, 0), np.quantile(positive, .99))
     return Space(transform, vectors, weights, {"family": family, "numeric_attempts": attempts,
                                               "positive_rank": int(len(positive)),
-                                              "Dc_floor_dominated": dc_trace / np.trace(covariance) < 1e-5})
+                                              "Dc_floor_dominated": bool(dc_trace / np.trace(covariance) < 1e-5)})
 
 
 def capture(space, source_deltas, rank):

@@ -94,7 +94,7 @@ def resolve_inputs(args):
 def run(args):
     from g21.io import atomic_json, file_digest
     from e1111.audit import audit, inventory, index_pairing
-    from e1111.features import extract, export_dataset
+    from e1111.features import extract, export_dataset, load_cache
     from e1111.pipeline import run_s0, calibrate, score_export, attribution
     from e1111.protocol import protocol
 
@@ -155,9 +155,22 @@ def run(args):
             save()
             return manifest
         audit_path = output / "audit/audit.json"
-        cache_path = output / "features/features.npz"
-        stage("features", extract, audit_path, config_path, source["checkpoint"], inputs["clip"],
-              cache_path, device=args.device, batch_size=args.batch_size, d8=not args.skip_d8)
+        existing_cache = getattr(args, "feature_cache", None)
+        cache_path = Path(existing_cache).resolve() if existing_cache else output / "features/features.npz"
+        if existing_cache:
+            manifest["stage"] = "features"
+            save()
+            feature_identity = load_cache(cache_path, audited)[1]
+            if (feature_identity["checkpoint_sha256"] != source["base_sha256"]
+                    or feature_identity["base_config_sha256"] != file_digest(config_path)
+                    or feature_identity["d8"] != (not args.skip_d8)):
+                raise ValueError("Feature cache differs from the requested B0, resolved configuration or D8 setting")
+            manifest["stages"]["features"] = {"status": "REUSED", "cache_path": str(cache_path)}
+            print(f"E1111A/features: {manifest['stages']['features']}", flush=True)
+            save()
+        else:
+            stage("features", extract, audit_path, config_path, source["checkpoint"], inputs["clip"],
+                  cache_path, device=args.device, batch_size=args.batch_size, d8=not args.skip_d8)
         s0 = stage("s0", run_s0, audit_path, cache_path, output / "s0")
         if s0["status"] not in ("S0_PASS", "FISHER_D1_PASS_PENDING_R2"):
             manifest.update(status=s0["status"], stage="s0")
@@ -183,6 +196,7 @@ def run(args):
                         claim_status="development experiment; S3 identity audit and formal blind tests remain separate")
     except Exception as exc:
         manifest.update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
+        print(f"E1111A/{manifest['stage']}: {manifest['error']}", flush=True)
     finally:
         save()
     print(f"E1111A results: {output / 'all_results.json'}", flush=True)

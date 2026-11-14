@@ -113,8 +113,10 @@ def test_standard_inputs_require_no_original_videos_or_predictor(tmp_path, monke
 
 
 @pytest.mark.parametrize("gate_pass", [False, True])
-def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypatch, gate_pass):
+@pytest.mark.parametrize("reuse_cache,cache_identity_ok", [(False, True), (True, True), (True, False)])
+def test_full_runner_respects_gate_and_validated_feature_reuse(tmp_path, monkeypatch, gate_pass, reuse_cache, cache_identity_ok, capsys):
     from e1111 import audit, features, pipeline
+    from g21.io import file_digest
 
     runner = load_runner(monkeypatch)
     calls = []
@@ -142,19 +144,31 @@ def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypat
                       "status": "P_D7_PASS" if gate_pass else "S0_PAUSED_P_D7"})()
     monkeypatch.setattr(audit, "audit", audit_same_inputs)
     monkeypatch.setattr(features, "extract", record("features", {}))
+    def cached(*args):
+        calls.append("cache")
+        config = next((tmp_path / "run").glob("seed*/resolved_base_config.json"))
+        return {}, {"checkpoint_sha256": "b0" if cache_identity_ok else "another B0",
+                    "base_config_sha256": file_digest(config), "d8": True}, {}
+    monkeypatch.setattr(features, "load_cache", cached)
     monkeypatch.setattr(pipeline, "run_s0", record("s0", {"status": "S0_PASS"}))
     monkeypatch.setattr(pipeline, "calibrate", record("calibrate", {}))
     monkeypatch.setattr(features, "export_dataset", record("export", {}))
     monkeypatch.setattr(pipeline, "score_export", record("score", {}))
     monkeypatch.setattr(pipeline, "attribution", record("attribution", {"passed": True}))
     args = argparse.Namespace(output_dir=tmp_path / "run", seed=1024, preflight=False,
-                              pair_map=None, device="cpu", batch_size=8, skip_d8=False)
+                              pair_map=None, device="cpu", batch_size=8, skip_d8=False,
+                              feature_cache=tmp_path / "previous.npz" if reuse_cache else None)
     result = runner.run(args)
     if not gate_pass:
         assert calls == ["inventory", "pairing", "audit"]
         assert result["status"] == "S0_PAUSED_P_D7"
+    elif reuse_cache and not cache_identity_ok:
+        assert calls == ["inventory", "pairing", "audit", "cache"]
+        assert result["status"] == "FAILED"
+        assert "Feature cache differs" in result["error"]
+        assert "E1111A/features: ValueError" in capsys.readouterr().out
     else:
-        assert calls == ["inventory", "pairing", "audit", "features", "s0", "calibrate",
+        assert calls == ["inventory", "pairing", "audit", "cache" if reuse_cache else "features", "s0", "calibrate",
                          "export", "score", "export", "score", "attribution"]
         assert result["status"] == "DEVELOPMENT_COMPLETE"
 
