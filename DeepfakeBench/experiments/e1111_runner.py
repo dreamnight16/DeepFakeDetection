@@ -91,11 +91,10 @@ def resolve_inputs(args):
 
 def run(args):
     from g21.io import atomic_json, file_digest
-    from e1111.audit import audit, inventory
+    from e1111.audit import audit, inventory, index_pairing
     from e1111.features import extract, export_dataset
     from e1111.pipeline import run_s0, calibrate, score_export, attribution
     from e1111.protocol import protocol
-    from g21.pairing import run_pairing
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     output = Path(args.output_dir) / f"seed{args.seed}_{stamp}_{os.getpid()}"
@@ -114,7 +113,8 @@ def run(args):
         save()
         result = function(*values, **keywords)
         manifest["stages"][name] = {key: result[key] for key in (
-            "status", "N4", "Ncell", "K_pair", "passed", "rho_sum", "usable_pairs") if key in result}
+            "status", "N4", "Ncell", "K_pair", "passed", "rho_sum", "index_pairable_videos",
+            "excluded_videos") if key in result}
         print(f"E1111A/{name}: {manifest['stages'][name]}", flush=True)
         save()
         return result
@@ -139,8 +139,9 @@ def run(args):
         if args.pair_map:
             pair_map = args.pair_map
         else:
-            stage("content_pairing", run_pairing, ff_index, inputs["data_root"], output / "content_pairing")
-            pair_map = output / "content_pairing/pair_map.json"
+            stage("index_pairing", index_pairing, ff_index, output / "index_pairing",
+                  data_root=inputs["data_root"])
+            pair_map = output / "index_pairing/pair_map.json"
         audited = stage("audit", audit, ff_index, inputs["data_root"], pair_map, output / "audit")
         if not audited["P_D7_pass"]:
             manifest.update(status=audited["status"], stage="audit")

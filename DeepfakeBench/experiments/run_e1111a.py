@@ -31,11 +31,11 @@ def build_parser():
     parser.add_argument("--skip_d8", action="store_true")
     parser.add_argument("--preflight", action="store_true")
     stages = parser.add_subparsers(dest="stage")
-    for name in ("inventory", "audit"):
+    for name in ("inventory", "index-pairing", "audit"):
         child = stages.add_parser(name)
         child.add_argument("--dataset-json", type=Path, default=ROOT / "preprocessing/dataset_json/FaceForensics++.json")
         child.add_argument("--output-dir", type=Path, required=True)
-        if name == "inventory":
+        if name in ("inventory", "index-pairing"):
             child.add_argument("--data-root", type=Path, help="Use the same crop files via a normalized index view")
         if name == "audit":
             child.add_argument("--data-root", type=Path, required=True)
@@ -95,6 +95,9 @@ def main(argv=None):
         elif args.stage == "inventory":
             from e1111.audit import inventory
             result = inventory(args.dataset_json, args.output_dir, data_root=args.data_root)
+        elif args.stage == "index-pairing":
+            from e1111.audit import index_pairing
+            result = index_pairing(args.dataset_json, args.output_dir, data_root=args.data_root)
         elif args.stage == "audit":
             from e1111.audit import audit
             result = audit(args.dataset_json, args.data_root, args.pair_map, args.output_dir)

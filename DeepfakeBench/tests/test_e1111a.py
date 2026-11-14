@@ -138,22 +138,51 @@ def test_audit_uses_complete_sources_equal_frames_and_reports_discarding(tmp_pat
     methods = protocol()["methods"]
     data = {"FF-real": {"train": {"c23": {v: {"frames": [f"real/{v}/{t}.png" for t in (0, 10, 20)]}
                                                for v in ids}}}}
-    rules = {}
     for method in methods:
         data[method] = {"train": {"c23": {
             f"{v}_999": {"frames": [f"{method}/{v}/{t}.png" for t in (
                 (0, 10) if v == ids[0] and method == methods[0] else (0, 10, 20))]}
             for v in ids}}}
-        rules[method] = {"verified": True, "reference_component": 0, "evidence": "fixture",
-                         "same_original_index_verified": True}
-    data_path, map_path = tmp_path / "data.json", tmp_path / "map.json"
+    data_path = tmp_path / "data.json"
     data_path.write_text(json.dumps({"FaceForensics++": data}))
-    map_path.write_text(json.dumps({"schema_version": 1, "rules": rules}))
-    report = audit_module.audit(data_path, tmp_path, map_path, tmp_path / "audit")
+    audit_module.index_pairing(data_path, tmp_path / "pairing")
+    report = audit_module.audit(data_path, tmp_path, tmp_path / "pairing/pair_map.json", tmp_path / "audit")
     assert report["P_D7_pass"] and report["N4"] == 32 and report["Ncell"] == 1
+    assert report["pairing_mode"] == "ffpp_official_target_original_index"
     assert report["K_pair"] == 2 and len(report["fit_pairs"]) == 32 * 4 * 2
     assert report["discarded_common_pair_fraction"] > 0
     assert load_audit(tmp_path / "audit/audit.json")["audit_sha256"] == report["audit_sha256"]
+
+
+def test_index_pairing_uses_official_target_and_exact_saved_indices_with_two_frames(tmp_path):
+    # All paths are metadata only; no G21 pixel scorer or images are needed.
+    data = {"FF-real": {"train": {"c23": {
+        v: {"frames": [f"real/{v}/{t}.png" for t in (20, 0, 10)]} for v in ("000", "999")}}}}
+    for method in protocol()["methods"]:
+        data[method] = {"train": {"c23": {
+            "000_999": {"frames": [f"{method}/000_999/{t}.png" for t in (20, 100, 0)]},
+            "998_000": {"frames": [f"{method}/998_000/{t}.png" for t in (0, 20)]},
+            "999_000": {"frames": [f"{method}/999_000/{t}.png" for t in (10, 11)]},
+            "bad": {"frames": []}}}}
+    path = tmp_path / "data.json"
+    path.write_text(json.dumps({"FaceForensics++": data}))
+    report = audit_module.index_pairing(path, tmp_path / "pairing")
+    assert report["index_pairable_videos"] == 4 and report["excluded_videos"] == 12
+    assert report["pixel_similarity_is_gate"] is False
+    mapping = json.loads((tmp_path / "pairing/pair_map.json").read_text())
+    for method in protocol()["methods"]:
+        accepted = mapping["overrides"][f"{method}/000_999"]
+        assert accepted["reference_component"] == 0
+        assert accepted["frame_matches"] == [[0, 0], [20, 20]]
+        assert mapping["overrides"][f"{method}/998_000"]["exclude_reason"] == "target_not_in_official_train_reals"
+        assert mapping["overrides"][f"{method}/999_000"]["exclude_reason"] == "insufficient_saved_frame_intersection"
+        assert mapping["overrides"][f"{method}/bad"]["excluded"]
+    # A generated map must not silently apply to another metadata snapshot.
+    mapping["dataset_sha256"] = "different metadata"
+    (tmp_path / "wrong-map.json").write_text(json.dumps(mapping))
+    with pytest.raises(ValueError, match="different dataset metadata"):
+        audit_module.audit(path, tmp_path, tmp_path / "wrong-map.json", tmp_path / "forbidden")
+    assert not (tmp_path / "forbidden").exists()
 
 
 def test_unverified_source_is_rejected_even_with_a_crop_claim(tmp_path, monkeypatch):

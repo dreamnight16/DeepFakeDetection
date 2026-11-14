@@ -1,4 +1,4 @@
-"""FF++ source splits and image-verified balanced pairing, independent of scores."""
+"""FF++ source splits and image-readable balanced pairing, independent of scores."""
 
 from collections import defaultdict
 import json
@@ -102,6 +102,59 @@ def _valid_image(root, relative):
         return False
 
 
+def index_pairing(dataset_json, output, *, data_root=None):
+    """Use FF++ target_source lineage and exact saved original frame indices."""
+    data = json.loads(Path(dataset_json).read_text(encoding="utf-8-sig"))["FaceForensics++"]
+    methods = protocol()["methods"]
+    reals = data["FF-real"]["train"]["c23"]
+    evidence = (
+        "FF++ official filenames are <target sequence>_<source sequence>; "
+        "target component 0 is the reference. Repository preprocessing preserves "
+        "the original cnt_frame in PNG filenames; pairs use equal saved indices. "
+        "https://github.com/ondyari/FaceForensics/blob/master/dataset/README.md")
+    mapping = {"schema_version": 1, "dataset_sha256": digest(data),
+               "pairing_mode": "ffpp_official_target_original_index",
+               "rules": {}, "overrides": {}}
+    decisions = []
+    for method in methods:
+        for key, entry in sorted(data[method]["train"]["c23"].items()):
+            ids = key.split("_")
+            reason = None
+            if len(ids) != 2 or not all(value.isdigit() for value in ids):
+                reason = "unsupported_ffpp_filename"
+            elif ids[0] not in reals:
+                reason = "target_not_in_official_train_reals"
+            else:
+                real = frame_map(reals[ids[0]], data_root)
+                fake = frame_map(entry, data_root)
+                common = sorted(real.keys() & fake.keys())
+                if len(common) < 2:
+                    reason = "insufficient_saved_frame_intersection"
+            if reason:
+                mapping["overrides"][f"{method}/{key}"] = {
+                    "excluded": True, "exclude_reason": reason}
+                decisions.append({"method": method, "video": key, "reason": reason})
+                continue
+            mapping["overrides"][f"{method}/{key}"] = {
+                "verified": True, "reference_component": 0,
+                "same_original_index_verified": True, "evidence": evidence,
+                "frame_matches": [[index, index] for index in common]}
+            decisions.append({"method": method, "video": key, "reason": "index_pairable",
+                              "reference": ids[0], "common_frames": len(common)})
+    report = {
+        "status": "INDEX_PAIRING_READY", "pairing_mode": mapping["pairing_mode"],
+        "index_pairable_videos": sum(row["reason"] == "index_pairable" for row in decisions),
+        "excluded_videos": sum(row["reason"] != "index_pairable" for row in decisions),
+        "verification_scope": "official lineage and equal saved frame indices; image availability is checked by audit",
+        "pixel_similarity_is_gate": False, "decisions": decisions,
+        "dataset_sha256": digest(data)}
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    atomic_json(output / "pair_map.json", mapping)
+    atomic_json(output / "pairing_audit.json", report)
+    return report
+
+
 def audit(dataset_json, data_root, pair_map, output):
     data_root = Path(data_root)
     if not data_root.is_dir():
@@ -110,6 +163,8 @@ def audit(dataset_json, data_root, pair_map, output):
     mapping = json.loads(Path(pair_map).read_text(encoding="utf-8-sig"))
     if mapping.get("schema_version") != 1:
         raise ValueError("Unsupported pair-map schema")
+    if mapping.get("dataset_sha256") is not None and mapping["dataset_sha256"] != digest(data):
+        raise ValueError("Pair map was generated from different dataset metadata")
     settings = protocol()
     reals = data["FF-real"]["train"]["c23"]
     splits = source_splits(reals)
@@ -231,6 +286,7 @@ def audit(dataset_json, data_root, pair_map, output):
         "split_scope": "content-reference sources; not both FF++ source lineages",
         "cross_split_other_lineage": cross_split_lineage,
         "dataset_sha256": digest(data), "pair_map_sha256": digest(mapping),
+        "pairing_mode": mapping.get("pairing_mode", "explicit_provided_map"),
         "data_root": str(data_root.resolve()), "fit_pairs": balanced, "sel_pairs": sel_pairs,
         "real_frames": {split: {v: [{"frame": t, "path": p}
                                     for t, p in sorted(selected_real[v].items())] for v in sources}

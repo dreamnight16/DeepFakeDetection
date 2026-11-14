@@ -115,7 +115,6 @@ def test_standard_inputs_require_no_original_videos_or_predictor(tmp_path, monke
 @pytest.mark.parametrize("gate_pass", [False, True])
 def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypatch, gate_pass):
     from e1111 import audit, features, pipeline
-    from g21 import pairing
 
     runner = load_runner(monkeypatch)
     calls = []
@@ -131,7 +130,7 @@ def test_full_runner_stops_before_model_work_when_gate_fails(tmp_path, monkeypat
         return run
 
     monkeypatch.setattr(audit, "inventory", record("inventory", {"dataset_json": str(tmp_path / "index.json")}))
-    monkeypatch.setattr(pairing, "run_pairing", record("pairing", {}))
+    monkeypatch.setattr(audit, "index_pairing", record("pairing", {}))
     def forbidden_crop(*args, **kwargs):
         raise AssertionError("Default A must not generate new crops or require original videos")
     monkeypatch.setattr(shared_crop, "prepare", forbidden_crop)

@@ -33,6 +33,7 @@ def protocol():
         "K_pair": "minimum common valid frame count over all complete sources; never tuned",
         "input_preprocessing": "same existing DeepfakeBench face-crop files as B0/B; no raw video or recropping",
         "crop_scope": "independent per-frame alignment; paired moments may include crop nuisance",
+        "pairing_source": "FF++ official target_source metadata and exact saved frame intersection; no G21 background-pixel acceptance gate",
         "execution": "local source/static checks only; all data/model execution on server",
     }
 
