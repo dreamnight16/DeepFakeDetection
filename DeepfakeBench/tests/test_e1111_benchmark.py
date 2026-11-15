@@ -53,7 +53,8 @@ def test_archived_native_identity_and_scores_are_checked(tmp_path, changed):
         assert benchmark.reference_alignment(values, path)["status"] == "MATCHED"
 
 
-def test_eight_native_datasets_same_tensors_and_primary_metrics(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cache_features", [False, True])
+def test_eight_native_datasets_same_tensors_and_primary_metrics(tmp_path, monkeypatch, cache_features):
     import torch
     import run_e1021
 
@@ -114,7 +115,7 @@ def test_eight_native_datasets_same_tensors_and_primary_metrics(tmp_path, monkey
     for dataset in TEST_DS:
         np.savez_compressed(references / f"{dataset}.npz", **reference)
     result = benchmark.evaluate(metric_path, base_path, "B0.pth", "clip", eval_path,
-                                tmp_path / "result", device="cpu", reference_exports=references)
+                                tmp_path / "result", device="cpu", reference_exports=references, cache_features=cache_features)
     assert result["status"] == "OK" and calls == TEST_DS and seeds == [1024] * len(TEST_DS)
     assert tensor_rows == [0., 1., 2., 3.] * len(TEST_DS)
     assert set(result["datasets"]) == set(TEST_DS)
@@ -125,6 +126,11 @@ def test_eight_native_datasets_same_tensors_and_primary_metrics(tmp_path, monkey
         np.testing.assert_array_equal(saved["path"], reference["path"])
         np.testing.assert_array_equal(saved["labels"], reference["labels"])
         np.testing.assert_array_equal(saved["D_J"], [0., 10., 4., 4.])
+    if cache_features:
+        assert set(result["feature_cache"]) == set(TEST_DS)
+        features = np.load(tmp_path / "result/features/WDF.npy", mmap_mode="r", allow_pickle=False)
+        np.testing.assert_array_equal(features, np.broadcast_to(np.arange(4)[:, None], (4, 1024)))
+        assert result["feature_cache"]["WDF"]["rows"] == 4
 
 
 def test_latest_benchmark_reuses_only_an_existing_calibrated_run(tmp_path, monkeypatch):

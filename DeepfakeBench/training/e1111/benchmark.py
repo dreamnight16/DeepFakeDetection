@@ -8,10 +8,18 @@ from pathlib import Path
 import numpy as np
 
 from g21.data import MEAN, STD
-from g21.io import atomic_json, file_digest
+from g21.io import atomic_json, file_digest, digest
 from .features import FrozenFeatures
 from .metric import score
 from .pipeline import load_metric
+
+
+def test_source_identity():
+    root = Path(__file__).resolve().parents[2]
+    names = ("training/e1111/benchmark.py", "training/dataset/abstract_dataset.py",
+             "experiments/e0924_export.py", "experiments/e0924_protocol.py",
+             "experiments/experiment_utils.py", "experiments/run_e1021.py")
+    return {name: file_digest(root / name) for name in names}
 
 
 def reference_alignment(values, path):
@@ -47,7 +55,7 @@ def readout(values, scores, threshold):
 
 
 def evaluate(metric_path, base_config, checkpoint, clip, evaluation_config, output,
-             *, device="cuda:0", reference_exports=None):
+             *, device="cuda:0", reference_exports=None, cache_features=False):
     import torch
     import experiment_utils as utilities
     from e0924_export import strict_loader
@@ -84,8 +92,9 @@ def evaluate(metric_path, base_config, checkpoint, clip, evaluation_config, outp
               "accuracy_protocol": "frame accuracy; A uses the frozen 32-frame D_theta video threshold as reference only, not an 8-frame FPR operating point; B0 uses probability > 0.5",
               "frozen_metric_identity": identity, "metric_sha256": file_digest(metric_path),
               "benchmark_implementation_sha256": file_digest(__file__),
+              "test_source_sha256": test_source_identity(),
               "baseline_eval_config_sha256": file_digest(evaluation_config),
-              "datasets": {}, "detectors": {}, "B0": {}, "reference_alignment": {},
+              "datasets": {}, "detectors": {}, "B0": {}, "reference_alignment": {}, "feature_cache": {},
               "dataset_sha256": {name: file_digest(Path(config["dataset_json_folder"]) / f"{name}.json")
                                  for name in TEST_DS},
               "results_dir": str(output.resolve())}
@@ -98,6 +107,11 @@ def evaluate(metric_path, base_config, checkpoint, clip, evaluation_config, outp
             seed_everything(config["manualSeed"])
             original = utilities.get_data_loader(config, dataset).dataset
             batches = {key: [] for key in ("labels", "path", "video_id", "cls_prob", "global_log_odds")}
+            feature_rows, cursor = None, 0
+            if cache_features:
+                (output / "features").mkdir(exist_ok=True)
+                feature_rows = np.lib.format.open_memmap(output / "features" / f"{dataset}.npy", mode="w+",
+                                                         dtype=np.float32, shape=(len(original.image_list), 1024))
             try:
                 with torch.no_grad():
                     for batch in strict_loader(original, config["test_batchSize"]):
@@ -107,6 +121,9 @@ def evaluate(metric_path, base_config, checkpoint, clip, evaluation_config, outp
                         if tuple(tokens.shape[1:]) != (257, 1024):
                             raise ValueError("Unified test expects CLIP (N,257,1024) tokens")
                         features = tokens[:, 1:].mean(dim=1).cpu().float().numpy()
+                        if feature_rows is not None:
+                            feature_rows[cursor:cursor + len(features)] = features
+                            cursor += len(features)
                         logits = extractor.model.classifier(vision["pooler_output"])
                         batches["labels"].append(batch["label"].cpu().numpy())
                         batches["path"].append(np.asarray(batch["path"]))
@@ -120,12 +137,21 @@ def evaluate(metric_path, base_config, checkpoint, clip, evaluation_config, outp
                 values = {key: np.concatenate(parts) for key, parts in batches.items()}
                 if any(not np.isfinite(v).all() for key, v in values.items() if key not in ("path", "video_id")):
                     raise ValueError(f"Nonfinite unified test scores: {dataset}")
+                if feature_rows is not None:
+                    if cursor != len(feature_rows):
+                        raise ValueError("Native test feature rows differ from the strict loader")
+                    feature_rows.flush()
+                    result["feature_cache"][dataset] = {"file": f"features/{dataset}.npy",
+                        "sha256": file_digest(output / "features" / f"{dataset}.npy"), "rows": cursor,
+                        "rows_sha256": digest({key: values[key].tolist() for key in ("labels", "path", "video_id")})}
                 if reference_exports is not None:
                     result["reference_alignment"][dataset] = reference_alignment(
                         values, Path(reference_exports) / f"{dataset}.npz")
                 else:
                     result["reference_alignment"][dataset] = {"status": "SHARED_LOADER_NO_ARCHIVED_REFERENCE"}
                 np.savez_compressed(exports / f"{dataset}.npz", **values)
+                if feature_rows is not None:
+                    result["feature_cache"][dataset]["export_sha256"] = file_digest(exports / f"{dataset}.npz")
                 detectors = [name for name in values if name.startswith(("D_", "C_"))]
                 result["detectors"][dataset] = {
                     name: readout(values, values[name], identity["thresholds"][name]["0.1"]) for name in detectors}
@@ -134,6 +160,8 @@ def evaluate(metric_path, base_config, checkpoint, clip, evaluation_config, outp
                 atomic_json(output / "all_results.json", result)
                 print(f"E1111A/benchmark/{dataset}: {result['datasets'][dataset]}", flush=True)
             finally:
+                if feature_rows is not None:
+                    del feature_rows
                 env = getattr(original, "env", None)
                 if env is not None:
                     env.close()

@@ -5,8 +5,8 @@
     "E1111B"
   ],
   "verification": "static_only",
-  "date": "2026-11-14",
-  "python_files_ast_parsed": 7,
+  "date": "2026-11-15",
+  "python_files_ast_parsed": 10,
   "ruff_rules": [
     "E9",
     "F63",
@@ -15,7 +15,7 @@
   ],
   "ruff_result": "PASS",
   "diff_whitespace_check": "PASS",
-  "static_mle_review": "approved saved B0 eval config/native loader/shared AUC, same-batch B0 replay and archive checks; existing fit artifacts retained; no runtime tests executed",
+  "static_mle_review": "approved full ablation single-factor isolation, source-only/oracle separation, bound memmap cache, D5/D6 diagnostics and default/standalone suite; no runtime tests executed",
   "runtime_tests_executed": false,
   "data_audit_executed": false,
   "feature_extraction_executed": false,
@@ -25,7 +25,7 @@
   "note": "User requested local code and static checks only; all runtime validation remains on the server.",
   "shared_crop_preparation_executed": false,
   "native_B0": "original effort + original batch CE; independently initialized from CLIP; same E1025 training and 8/8-frame evaluation",
-  "last_change_ast_files_parsed": 7,
+  "last_change_ast_files_parsed": 10,
   "all_in_one_launcher": "one native B0; same-card sequential / two-card parallel A and PUCE; optional verified B0 reuse",
   "launcher_runtime_tests_executed": false,
   "path_relocation": "/home/user1 -> /mnt/data2; model/statistical conditions unchanged",
@@ -44,5 +44,13 @@
   "unified_benchmark": "same saved B0 eval config, native test loader and strict_loader, actual 8-frame rows, shared frame/video/legacy AUC and 7/6-dataset means",
   "benchmark_reference": "match labels/path/video_id and B0 probability/log-odds against archived B0 exports when available; otherwise identify fresh same-checkpoint replay",
   "benchmark_runtime_tests_executed": false,
-  "fit_artifact_implementations_changed": false
+  "fit_artifact_implementations_changed": false,
+  "full_ablation_suite": "36 source-only score configurations plus native B0 and transductive covariance oracle; 38 rows on the same 8 native datasets when all ranks are defined",
+  "ablation_refits": "fixed main rank/lambda/tau/gamma except the single intervened factor; lambda_t stays zero; C4 retains D_c",
+  "prototype_baseline": "K=1..8 spherical real prototypes; source-equal frame weights; D_rad-only gap selection with 20 fixed-seed PCA-box references",
+  "diagnostics": "D4 gap; D5 frozen development error overlap and cluster bootstrap; optional actual 512-D ArcFace D6 and identity-matched FF++ val recomputation",
+  "identity_missing_weights": "UNAVAILABLE_ARCFACE_WEIGHTS per original optional protocol; no identity claim or CLIP substitution",
+  "ablation_outputs": "per-arm models and scores, all_results.json, ablation_metrics.csv and ablation_summary.csv; undefined cases explicitly retained",
+  "ablation_runtime_tests_executed": false,
+  "ablation_server_validation": "pending; source run 20261114_182140 remains reusable"
 }

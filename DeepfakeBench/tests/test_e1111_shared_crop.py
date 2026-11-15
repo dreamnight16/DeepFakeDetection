@@ -116,7 +116,7 @@ def test_standard_inputs_require_no_original_videos_or_predictor(tmp_path, monke
 @pytest.mark.parametrize("gate_pass", [False, True])
 @pytest.mark.parametrize("reuse_cache,cache_identity_ok", [(False, True), (True, True), (True, False)])
 def test_full_runner_respects_gate_and_validated_feature_reuse(tmp_path, monkeypatch, gate_pass, reuse_cache, cache_identity_ok, capsys):
-    from e1111 import audit, features, pipeline, benchmark
+    from e1111 import audit, features, pipeline, ablations
     from g21.io import file_digest
 
     runner = load_runner(monkeypatch)
@@ -156,11 +156,11 @@ def test_full_runner_respects_gate_and_validated_feature_reuse(tmp_path, monkeyp
     monkeypatch.setattr(features, "export_dataset", record("export", {}))
     monkeypatch.setattr(pipeline, "score_export", record("score", {}))
     monkeypatch.setattr(pipeline, "attribution", record("attribution", {"passed": True}))
-    monkeypatch.setattr(benchmark, "evaluate", record("benchmark", {
-        "status": "OK", "datasets": {}, "metric_protocol": "full-path video_id; frame mean",
+    monkeypatch.setattr(ablations, "run_suite", record("ablations", {"status": "OK", "benchmark": {
+        "datasets": {}, "metric_protocol": "full-path video_id; frame mean",
         "primary_detector": "D_J", "independent_datasets": [], "video_auc_seven_mean_fullpath": .6,
         "independent_video_auc_mean_fullpath": .6, "frame_auc_seven_mean": .6,
-        "independent_frame_auc_mean": .6}))
+        "independent_frame_auc_mean": .6}}))
     args = argparse.Namespace(output_dir=tmp_path / "run", seed=1024, preflight=False,
                               pair_map=None, device="cpu", batch_size=8, skip_d8=False,
                               feature_cache=tmp_path / "previous.npz" if reuse_cache else None)
@@ -175,7 +175,7 @@ def test_full_runner_respects_gate_and_validated_feature_reuse(tmp_path, monkeyp
         assert "E1111A/features: ValueError" in capsys.readouterr().out
     else:
         assert calls == ["inventory", "pairing", "audit", "cache" if reuse_cache else "features", "s0", "calibrate",
-                         "export", "score", "export", "score", "attribution", "benchmark"]
+                         "export", "score", "export", "score", "attribution", "ablations"]
         assert result["status"] == "COMPLETE"
         assert result["video_auc_seven_mean_fullpath"] == .6
 

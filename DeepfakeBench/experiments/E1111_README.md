@@ -1,6 +1,6 @@
 # E1111：冻结特征度量与 CE 兼容 PU 正则
 
-本机仅编写代码、阅读源码与静态检查；**数据审计、特征提取、运行测试、训练及评估全部留在服务器执行**。当前没有 E1111 实验指标，也没有认定 P-D7 已通过。
+本机仅编写代码、阅读源码与静态检查；**数据审计、特征提取、运行测试、训练及评估全部留在服务器执行**。用户服务器已完成video-mean主流程：N4=395、Ncell=1、S0及开发归因通过；完整消融数值以服务器新运行的输出为准。
 
 | 分支 | 基础 | 本轮改变 |
 |---|---|---|
@@ -65,7 +65,7 @@ B0训练前会构造与原管线相同的Dataset，只读取其实际采样清�
 
 总入口只接收成功的原版effort+CE B0，校验checkpoint SHA及种子、epoch、batch、real ratio、c23和8/8帧设置。B阶段固定传--arms PUCE，只运行CE_L0和三个小权重配置，原版B0只训练一次；A明确传入该次B0目录，不会自动回到历史E0924权重。需要覆盖epoch、batch或数据路径时，在总入口传同名训练参数，同时用于新B0和B；复用B0时若训练条件不一致会在启动前报出差异。两个分支同时继承B0的实际索引目录、RGB根目录及CLIP路径；索引逐文件SHA与B0 manifest核对，RGB/CLIP覆盖与B0不一致时拒绝，避免两支使用不同数据或预训练源。旧配置省略的默认路径仅在原加载代码SHA一致时从其源码读取，不加载模型。
 
-A不再要求原视频、dlib权重或共享重裁剪，直接读取与B0/B相同RGB根目录中的预处理图片。其他数据/CLIP参数沿用现有入口；P-D7、统计选参、B0/B训练条件均保持不变。总入口仅执行服务器开发实验，不自动启动正式盲测。
+A不再要求原视频、dlib权重或共享重裁剪，直接读取与B0/B相同RGB根目录中的预处理图片。数据/CLIP参数沿用现有入口，B0/B训练条件不变；视频均值版输入门槛定义见下文。总入口默认完成A主流程、完整消融和统一测试，再按原调度执行B分支。
 
 总输出目录为 experiment_results/E1111/all/seed1024_本次时间戳/，包含B0.log、A.log、B.log和总all_results.json；每个分支保留自己的完整结果目录。看总调度日志用 tail -f nohup_E1111.log，具体训练日志路径在启动时打印。A因数据门槛或统计判据停止时，B仍继续；B0失败时两支均不启动。停止总进程时会终止其正在运行的子进程组。
 
@@ -90,7 +90,7 @@ A不再要求原视频、dlib权重或共享重裁剪，直接读取与B0/B相�
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111b.py \
       > nohup_E1111B.log 2>&1 &
 
-A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++官方视频谱系映射 → 视频集合可用性审计 → 特征提取 → 视频均值S0 → 校准 → 两个开发源导出/归因 → 原生8帧统一基准评测。无需人工制作配对文件或修改“已验证”字段，不从头训练骨干。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
+A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++官方视频谱系映射 → 视频集合可用性审计 → 特征提取 → 视频均值S0 → 校准 → 两个开发源导出/归因 → 完整消融矩阵及原生8帧统一测试。无需人工制作配对文件或修改“已验证”字段，不从头训练骨干。B直接沿用E1025训练链路，默认依次运行独立原版B0、CE_L0和三个小权重正则配置。
 
 看日志：tail -f nohup_E1111A.log 或 tail -f nohup_E1111B.log。A的all_results.json保存当前阶段和停止原因；每次启动创建独立运行目录。P-D7等科研判据不通过时如实停止，不修改门槛。
 
@@ -98,7 +98,7 @@ A复用已有B0，默认入口自动执行：索引盘点/路径视图 → FF++�
 
 A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处理图片；不生成新的裁剪目录，也不改变原JSON或PNG。原视频已删除不影响这一路径。对于绝对路径或带./的索引，程序仅生成指向同一文件的内部相对路径视图，保持帧列表顺序和样本成员不变；不会借此换图或放宽配对条件。
 
-训练结束后，终端会打印该次运行目录下的all_results.json。A可将**该次新运行目录**作为 --base_run；程序只接受成功的原生B0、读取B0/train_config.json并校验checkpoint SHA，不会误取PUCE权重。早期示例中的E0924路径仅用于旧B0复现；需要新B0时改用新运行目录。正式对照查看A的benchmark8/all_results.json及主结果中的datasets；32帧开发诊断在dev_ff/dev_cdf目录单列。
+训练结束后，终端会打印该次运行目录下的all_results.json。A可将**该次新运行目录**作为 --base_run；程序只接受成功的原生B0、读取B0/train_config.json并校验checkpoint SHA，不会误取PUCE权重。早期示例中的E0924路径仅用于旧B0复现；需要新B0时改用新运行目录。正式对照查看A的ablations/all_results.json、两张CSV及主结果中的datasets；32帧开发诊断在dev_ff/dev_cdf目录单列。
 
 ## E1111A：预注册执行规则
 
@@ -167,7 +167,7 @@ A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处�
       --base-config "$DB_B0_CONFIG" --checkpoint "$DB_B0" \
       --clip-pretrained-path "$DB_CLIP" --output-dir "$E1111_OUT/calibrated"
 
-新版S0报告保存四项重构误差、各ρ、D1逐折选参表/拟合方法、bootstrap、D2/D8、有效秩和数值恢复记录；旧模式保留五项报告。失败状态返回非零，不以NaN继续。D4的gap诊断本次标记 NOT_RUN，不自动引入多中心；它不是S0通过门槛。新版不沿用原逐帧完整机制资格。
+新版S0报告保存四项重构误差、各ρ、D1逐折选参表/拟合方法、bootstrap、D2/D8、有效秩和数值恢复记录；旧模式保留五项报告。失败状态返回非零，不以NaN继续。S0阶段不计算D4；完整消融阶段补做gap诊断，仅为R-style选择K，不改变主模型单中心或S0门槛。新版不沿用原逐帧完整机制资格。
 
 ### S1归因与后续评估
 
@@ -197,7 +197,7 @@ A的拟合、D_theta校准和开发/测试评测均读取同一套现有预处�
 
 S1对两个开发源等权平均TPR，配对、按源簇及数据集分层bootstrap1000次。通过要求 D_J-max(D_R,D_F) 的单侧95%下界>0.01，且随机谱未达到D_F的90%。不接受测试集结果作为归因输入。
 
-S2同时报告TPR(γ)曲线、内点/端点最优和独立D1。**ρcap不含γ，不会随γ改善**，因此不实现原决策文档中将其要求为γ单调函数的矛盾判据。S3身份混杂仍需ArcFace/匹配子集证据；结果保持 NOT_EVALUATED，不能据S1自动宣称完整机制。
+S2同时报告TPR(γ)曲线、内点/端点最优和独立D1。**ρcap不含γ，不会随γ改善**，因此不实现原决策文档中将其要求为γ单调函数的矛盾判据。完整消融阶段按ArcFace权重可用性执行S3身份诊断和匹配子集复算；缺权重明确标不可用，不能据S1自动宣称完整机制。
 
 原export/score接口的32帧测试保留为补充诊断；其低FPR统计不替代下面统一8帧的AUC主对照。n<50只报AUC；50≤n<100仅报α=0.10；n≥100报0.10/0.05，FPR带Clopper–Pearson区间。历史选点checkpoint继承CDF-v2暴露，不能称为全新未见源的干净盲测。
 
@@ -214,7 +214,39 @@ S2同时报告TPR(γ)曲线、内点/端点最优和独立D1。**ρcap不含γ�
     CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111a.py benchmark --latest \
       > nohup_E1111A_benchmark.log 2>&1 &
 
---latest在默认E1111A目录中选择时间最新且已有calibrated_metric.npz的运行；也可用 --run-dir 指定确切运行。补测结果保存到该运行的新benchmark8_时间戳目录；新启动的完整A流程默认保存到benchmark8目录，并将主AUC汇总到all_results.json。开发归因失败仍保留S1_FAILED状态及统一测试结果，不据测试指标改变研究判定。
+--latest在默认E1111A目录中选择时间最新且已有calibrated_metric.npz的运行；也可用 --run-dir 指定确切运行。这个benchmark命令只补主模型与原有方向对照；完整矩阵使用下面的ablations命令。新启动的完整A流程默认执行整套消融，主AUC仍写入all_results.json。开发归因失败保留S1_FAILED状态，不据测试指标改变研究判定。
+
+### 完整基线、消融与敏感性矩阵
+
+已有A校准模型可直接补跑全部配置，不重训B0/B、不重做嵌套D1：
+
+    CUDA_VISIBLE_DEVICES=0 nohup python -u experiments/run_e1111a.py ablations \
+      --run-dir experiment_results/E1111/E1111A/seed1024_20261114_182140_135529_2150846 \
+      > nohup_E1111A_ablations.log 2>&1 &
+
+| 配置 | 实际执行内容 |
+|---|---|
+| B0、D_R/D_F/D_J/D_P、三个方向对照 | 同一批8帧、同一骨干前向，保留原冻结分数及原B0归档核验 |
+| M-style | 单高斯NLL重实现；与D_R为正仿射关系，因此不是独立的增益证据，也不冒称muFlow完整模型 |
+| R-style | 无协方差球面原型距离；K=1..8逐项拟合、逐项评测，主K只由D_rad gap选择 |
+| C4_no_method_reg | 真正以lambda_m=lambda_t=0重新拟合；Dc保留，主rank/tau/gamma固定 |
+| rank_2/4/8 | 只改变秩；lambda/tau/gamma固定，不重新选择其他参数 |
+| lambda_0/0.1/0.3/1 | 各lambda独立拟合；rank/tau/gamma固定 |
+| tau_0.1/0.3/0.5 | 重新估计真实协方差并重新拟合方向；rank/lambda/gamma固定 |
+| gamma全网格 | 固定主模型方向/秩/协方差，报告0/0.25/0.5/1/2/4/8/inf全部结果，不按测试集选最优 |
+| C5_oracle_Sigma_R | 每个目标库仅使用真实视频、视频等权估协方差并重拟合方向；评分中心仍为源mu，主rank/lambda/tau/gamma固定 |
+
+正常B族共有38行评分配置（包含主配置、端点及参数网格中重复的参照行），每行评测同样8库；不称为38次独立神经网络训练。模型在读取目标测试特征前拟合并冻结，全部配置保留，不用测试AUC反向选参。lambda_t按原协议固定0，不新增非零扫描。正谱秩不足等数学无定义情况逐项报告原因，不补任意方向或伪造结果。
+
+R-style在L2归一化特征上做球面k-means，帧权重为每视频1/n、源视频等权；评分为最近原型的余弦距离。D4仅使用D_rad真实视频均值，K=1..8、seed1024、20份PCA包围盒均匀参考样本（还原并归一化到球面），观测和参考使用相同距离；采用最小K的一标准误规则，K>1还要求相对K=1的gap增益超过其标准误。固定K后才在D_fit拟合相应原型，不使用目标库标签或AUC。
+
+C5是显式使用目标真实标签的transductive诊断，协方差围绕目标真实均值估计，评分中心保持源均值；它不是无标签适应，不保证优于主方法，不能纳入source-only主张。主模型与其他普通消融不接触目标标签作拟合或选择。
+
+诊断同时汇总原S0的D1/D2/D3/D7/D8，新增D4 gap、D5开发错误Jaccard及源簇bootstrap增益。D5分别报告表内“下界>0”与“一点增益”条件；不额外选择融合权重。R3仍关闭，D3仅报接受域内比例；R4优化不在本轮范围。
+
+D6使用真实512维ArcFace ONNX识别权重，自动查找 ~/.insightface/models/buffalo_l/w600k_r50.onnx 及项目preprocessing/training目录下同名文件，也可用 --arcface-model 指定。输入为现有统一裁剪图片，RGB、112px、默认(x-127.5)/127.5；内置归一化的模型须显式设 --arcface-input-mean 0 --arcface-input-std 1。genuine与fake-real两侧均使用相同q帧均值；匹配阈值固定为D_sel genuine余弦相似度5%分位，再在FF++ val的匹配身份子集重算冻结AUC/TPR、报告方法组成和覆盖率。高身份差AUC只触发混杂警报，不作因果归因。缺权重时按原01 §1.4报告 UNAVAILABLE_ARCFACE_WEIGHTS，身份混杂仍未控制，不用CLIP或随机权重替代。
+
+输出包括 all_results.json、ablation_metrics.csv（逐配置逐库）、ablation_summary.csv（七库/独立六库均值）、每配置模型、校准阈值和逐帧分数。内部benchmark8只进行一次测试骨干前向，并保存逐库float32 memmap特征；后续所有配置共享同一行身份与输入快照。已有完整缓存可用 --test-feature-cache 指向该benchmark8目录；必须完整OK，且权重/模型/原生配置/源码/索引/行身份及文件摘要都匹配，半成品不可复用。单独ablations结果写入该源运行的新ablations_时间戳目录，不覆盖之前结果。
 
 ## E1111B：CE + 小权重 PU 正则
 
@@ -245,7 +277,7 @@ lam=0直接返回CE，值与梯度均一致。非零lam的训练批必须同时�
 
 沿用原服务器依赖环境；未增加新的训练框架或第三方依赖。测试已编写，**本机未执行**：
 
-    python -m pytest -q tests/test_e1111a.py tests/test_e1111_video_mean.py tests/test_e1111_benchmark.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py tests/test_e1111_paths.py
+    python -m pytest -q tests/test_e1111a.py tests/test_e1111_video_mean.py tests/test_e1111_benchmark.py tests/test_e1111_ablations.py tests/test_e1111b.py tests/test_e1111_shared_crop.py tests/test_e1111_launcher.py tests/test_e1111_paths.py
     python -m pytest -q tests/test_e1025_pu.py tests/test_e1025_runner.py \
       tests/test_e1025_integration.py tests/g21/test_builder.py tests/g21/test_pairing.py
 

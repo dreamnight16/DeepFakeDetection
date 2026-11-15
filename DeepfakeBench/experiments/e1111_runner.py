@@ -98,7 +98,7 @@ def run(args):
     from e1111.features import extract, export_dataset, load_cache
     from e1111.pipeline import run_s0, calibrate, score_export, attribution
     from e1111.protocol import protocol
-    from e1111.benchmark import evaluate
+    from e1111.ablations import run_suite
 
     statistic_mode = getattr(args, "statistic_mode", "video_mean")
     settings = protocol(statistic_mode)
@@ -193,16 +193,19 @@ def run(args):
             stage(f"{tag}_scores", score_export, destination / "features.npz", metric_path, scores)
             evaluations.append(scores)
         attribution_result = stage("attribution", attribution, evaluations, output / "attribution")
-        native = Path(source["config_path"]).parent
-        benchmark = stage("benchmark", evaluate, metric_path, config_path, source["checkpoint"], inputs["clip"],
-                          native / "eval_config.json", output / "benchmark8", device=args.device,
-                          reference_exports=native / "exports" if (native / "exports").is_dir() else None)
+        suite = stage("ablations", run_suite, output, output / "ablations", device=args.device,
+                      arcface_model=getattr(args, "arcface_model", None),
+                      arcface_input_mean=getattr(args, "arcface_input_mean", 127.5),
+                      arcface_input_std=getattr(args, "arcface_input_std", 127.5))
+        benchmark = suite["benchmark"]
         for key in ("datasets", "metric_protocol", "primary_detector", "independent_datasets",
                     "video_auc_seven_mean_fullpath", "independent_video_auc_mean_fullpath",
                     "frame_auc_seven_mean", "independent_frame_auc_mean"):
             manifest[key] = benchmark[key]
-        manifest["benchmark_results"] = str(output / "benchmark8/all_results.json")
-        manifest.update(status="COMPLETE" if attribution_result["passed"] else "S1_FAILED",
+        manifest["benchmark_results"] = str(output / "ablations/benchmark8/all_results.json")
+        manifest["ablation_results"] = str(output / "ablations/all_results.json")
+        manifest.update(status=("COMPLETE" if attribution_result["passed"] else "S1_FAILED")
+                        if suite["status"] == "OK" else suite["status"],
                         stage="complete", results_dir=str(output.resolve()),
                         claim_status="unified native-test benchmark complete; CDF-v2 inherits B0 selection exposure; no full-mechanism claim")
     except Exception as exc:

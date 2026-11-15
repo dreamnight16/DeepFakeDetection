@@ -25,6 +25,9 @@ def build_parser():
     parser.add_argument("--clip_pretrained_path", type=Path)
     parser.add_argument("--pair_map", type=Path)
     parser.add_argument("--feature_cache", type=Path, help="Reuse an existing cache after audit, B0 and configuration identity checks")
+    parser.add_argument("--arcface_model", type=Path, help="Optional actual 512-D ArcFace ONNX recognition weights for D6")
+    parser.add_argument("--arcface_input_mean", type=float, default=127.5)
+    parser.add_argument("--arcface_input_std", type=float, default=127.5)
     parser.add_argument("--statistic_mode", "--statistic-mode", choices=("video_mean", "paired_frame"),
                         default="video_mean", help="Video-mean method revision, or the legacy exact-frame protocol")
     parser.add_argument("--output_dir", type=Path, default=ROOT / "experiment_results/E1111/E1111A")
@@ -84,6 +87,15 @@ def build_parser():
     child.add_argument("--latest", action="store_true", help="Use the latest run containing a calibrated metric")
     child.add_argument("--output-dir", type=Path)
     child.add_argument("--device", default="cuda:0")
+    child = stages.add_parser("ablations", help="Full A baseline/ablation/sensitivity matrix using one frozen run")
+    child.add_argument("--run-dir", type=Path, default=ROOT / "experiment_results/E1111/E1111A")
+    child.add_argument("--latest", action="store_true")
+    child.add_argument("--output-dir", type=Path)
+    child.add_argument("--device", default="cuda:0")
+    child.add_argument("--test-feature-cache", type=Path, help="A completed benchmark8 directory containing bound memmap features")
+    child.add_argument("--arcface-model", dest="arcface_model", type=Path, default=argparse.SUPPRESS)
+    child.add_argument("--arcface-input-mean", dest="arcface_input_mean", type=float, default=argparse.SUPPRESS)
+    child.add_argument("--arcface-input-std", dest="arcface_input_std", type=float, default=argparse.SUPPRESS)
     child = stages.add_parser("prepare", help="Legacy shared-crop experiment, not part of the normal A run")
     child.add_argument("--dataset-json", type=Path, default=ROOT / "preprocessing/dataset_json/FaceForensics++.json")
     child.add_argument("--pair-map", type=Path, required=True)
@@ -146,13 +158,18 @@ def main(argv=None):
         elif args.stage == "benchmark":
             from e1111.benchmark import evaluate_run
             result = evaluate_run(args.run_dir, args.output_dir, latest=args.latest, device=args.device)
+        elif args.stage == "ablations":
+            from e1111.ablations import run_suite
+            result = run_suite(args.run_dir, args.output_dir, latest=args.latest, device=args.device,
+                               test_feature_cache=args.test_feature_cache, arcface_model=args.arcface_model,
+                               arcface_input_mean=args.arcface_input_mean, arcface_input_std=args.arcface_input_std)
         else:
             from e1111.shared_crop import prepare
             result = prepare(args.dataset_json, args.pair_map, args.raw_root, args.predictor_path, args.output_dir)
         summary = {key: result[key] for key in ("status", "N4", "Ncell", "K_pair", "gamma") if key in result}
         print(json.dumps({"output": result.get("results_dir", str(args.output_dir)), **summary}, ensure_ascii=False))
         return 0 if result.get("passed", True) and result.get("status") not in (
-            "FAILED", "S1_FAILED", "S0_STOPPED", "S0_PAUSED_P_D7",
+            "FAILED", "S1_FAILED", "S0_STOPPED", "S0_PAUSED_P_D7", "DIAGNOSTIC_FAILED",
             "S0_PAUSED_UNREADABLE_REAL", "D1_FAILED_REGULARIZATION_ONLY") else 2
     except (ValueError, OSError, KeyError) as exc:
         print(f"E1111A stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
