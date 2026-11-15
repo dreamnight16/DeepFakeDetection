@@ -6,7 +6,7 @@
   ],
   "verification": "static_only",
   "date": "2026-11-15",
-  "python_files_ast_parsed": 10,
+  "python_files_ast_parsed": 2,
   "ruff_rules": [
     "E9",
     "F63",
@@ -15,7 +15,7 @@
   ],
   "ruff_result": "PASS",
   "diff_whitespace_check": "PASS",
-  "static_mle_review": "approved full ablation single-factor isolation, source-only/oracle separation, bound memmap cache, D5/D6 diagnostics and default/standalone suite; no runtime tests executed",
+  "static_mle_review": "approved original-input-bound atomic recovery, local-cache reuse and unchanged completed-run artifacts; no runtime tests executed",
   "runtime_tests_executed": false,
   "data_audit_executed": false,
   "feature_extraction_executed": false,
@@ -25,7 +25,7 @@
   "note": "User requested local code and static checks only; all runtime validation remains on the server.",
   "shared_crop_preparation_executed": false,
   "native_B0": "original effort + original batch CE; independently initialized from CLIP; same E1025 training and 8/8-frame evaluation",
-  "last_change_ast_files_parsed": 10,
+  "last_change_ast_files_parsed": 2,
   "all_in_one_launcher": "one native B0; same-card sequential / two-card parallel A and PUCE; optional verified B0 reuse",
   "launcher_runtime_tests_executed": false,
   "path_relocation": "/home/user1 -> /mnt/data2; model/statistical conditions unchanged",
@@ -52,5 +52,6 @@
   "identity_missing_weights": "UNAVAILABLE_ARCFACE_WEIGHTS per original optional protocol; no identity claim or CLIP substitution",
   "ablation_outputs": "per-arm models and scores, all_results.json, ablation_metrics.csv and ablation_summary.csv; undefined cases explicitly retained",
   "ablation_runtime_tests_executed": false,
-  "ablation_server_validation": "pending; source run 20261114_182140 remains reusable"
+  "ablation_server_validation": "source run 20261114_182140 passed development; old linked fit cache is absent; automatic recovery awaits server rerun",
+  "fit_cache_recovery": "reconstruct only from original frozen B0/config/audit/D8, require identical feature identity, then atomically install local cache without rewriting completed A results"
 }

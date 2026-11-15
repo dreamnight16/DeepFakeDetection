@@ -11,13 +11,41 @@ from g21.io import atomic_json, digest, file_digest
 from .ablation_models import fit_variants, from_space, score_models
 from .ablation_diagnostics import complementarity, identity_audit, arcface_path
 from .benchmark import evaluate, readout, test_source_identity
-from .features import FrozenFeatures, load_audit, load_cache, read_rgb
+from .features import FrozenFeatures, extract, load_audit, load_cache, read_rgb
 from .metric import ProtocolError, conformal_threshold, fit_space, real_statistics, second_moment
 from .pipeline import _real_groups, load_metric, paired_features, video_mean_features, video_means
 from .protocol import protocol
 
 
-def context(run_dir, latest=False):
+def recover_fit_cache(run_dir, missing_path, manifest, config_path, config, audit, identity, device):
+    """Reconstruct a missing linked cache without changing the completed A run."""
+    expected = identity["feature_identity"]
+    checkpoint = manifest["base"]["checkpoint"]
+    if (file_digest(config_path) != expected["base_config_sha256"]
+            or file_digest(checkpoint) != expected["checkpoint_sha256"]):
+        raise ValueError("Cannot recover the fitted cache: original B0 or resolved configuration changed")
+    destination = Path(run_dir) / "features/features.npz"
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    temporary = destination.with_name(f"features.recover_{stamp}.npz")
+    print(f"E1111A/fit_cache: MISSING {missing_path}; rebuilding from the original frozen B0", flush=True)
+    extract(Path(run_dir) / "audit/audit.json", config_path, checkpoint, config["clip_pretrained_path"],
+            temporary, device=device, batch_size=8, d8=expected["d8"])
+    metadata = load_cache(temporary, audit)[1]
+    if metadata != expected:
+        raise ValueError("Recovered feature identity differs from the original fitted model; refusing reuse")
+    if destination.exists():
+        raise FileExistsError(f"Another cache already exists; refusing overwrite: {destination}")
+    temporary.replace(destination)
+    atomic_json(destination.parent / "recovery.json", {
+        "missing_reference": str(missing_path), "recovered_cache": str(destination.resolve()),
+        "feature_identity": metadata, "cache_sha256": file_digest(destination),
+        "verification": "same frozen B0/config/audit/implementation/versions; old cache bytes unavailable",
+    })
+    print(f"E1111A/fit_cache: RECOVERED {destination.resolve()}", flush=True)
+    return destination
+
+
+def context(run_dir, latest=False, device="cuda:0"):
     run_dir = Path(run_dir)
     if latest:
         candidates = sorted(run_dir.glob("seed*/calibrated/calibrated_metric.npz"))
@@ -29,12 +57,18 @@ def context(run_dir, latest=False):
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     audit = load_audit(run_dir / "audit/audit.json")
     cache_path = Path(manifest.get("stages", {}).get("features", {}).get("cache_path", run_dir / "features/features.npz"))
-    arrays, metadata, lookup = load_cache(cache_path, audit)
     model, identity = load_metric(run_dir / "calibrated/calibrated_metric.npz")
-    if metadata != identity["feature_identity"] or audit["audit_sha256"] != identity["audit_sha256"]:
-        raise ValueError("Ablation run, fitted model and cached features differ")
+    if audit["audit_sha256"] != identity["audit_sha256"]:
+        raise ValueError("Ablation run and fitted model use different audits")
     if "thresholds" not in identity or identity["status"] not in ("S0_PASS", "FISHER_D1_PASS_PENDING_R2"):
         raise ValueError("Ablations require an already calibrated S0/D1 model")
+    if not cache_path.is_file():
+        local_cache = run_dir / "features/features.npz"
+        cache_path = local_cache if local_cache.is_file() else recover_fit_cache(
+            run_dir, cache_path, manifest, config_path, config, audit, identity, device)
+    arrays, metadata, lookup = load_cache(cache_path, audit)
+    if metadata != identity["feature_identity"]:
+        raise ValueError("Ablation fitted model and cached features differ")
     s0 = json.loads((run_dir / "s0/s0.json").read_text(encoding="utf-8-sig"))
     return run_dir, manifest, config_path, config, audit, cache_path, arrays, lookup, model, identity, s0
 
@@ -130,7 +164,7 @@ def _write_tables(output, report):
 def run_suite(run_dir, output=None, *, latest=False, device="cuda:0", test_feature_cache=None,
               arcface_model=None, arcface_input_mean=127.5, arcface_input_std=127.5):
     from run_g25 import CROSS_DS, TEST_DS, VAL_DS
-    values = context(run_dir, latest)
+    values = context(run_dir, latest, device=device)
     run_dir, manifest, config_path, config, audit, cache_path, arrays, lookup, main, identity, s0 = values
     arcface_path(arcface_model)  # An explicitly supplied missing file is an input error.
     if output is None:

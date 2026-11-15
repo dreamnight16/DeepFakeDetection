@@ -248,6 +248,8 @@ D6使用真实512维ArcFace ONNX识别权重，自动查找 ~/.insightface/model
 
 输出包括 all_results.json、ablation_metrics.csv（逐配置逐库）、ablation_summary.csv（七库/独立六库均值）、每配置模型、校准阈值和逐帧分数。内部benchmark8只进行一次测试骨干前向，并保存逐库float32 memmap特征；后续所有配置共享同一行身份与输入快照。已有完整缓存可用 --test-feature-cache 指向该benchmark8目录；必须完整OK，且权重/模型/原生配置/源码/索引/行身份及文件摘要都匹配，半成品不可复用。单独ablations结果写入该源运行的新ablations_时间戳目录，不覆盖之前结果。
 
+若已完成A引用的旧运行特征缓存被移走或删除，ablations优先使用该A目录自己的features/features.npz；仍不存在时，用原审计清单、冻结B0、原配置及D8设置重新提取。完整核对原feature_identity后才原子保存到当前A目录，并写features/recovery.json；不重训B0、不重做S0，也不改写已完成的all_results.json。原权重、配置或提取身份变化时拒绝恢复，不能静默替换实验条件。
+
 ## E1111B：CE + 小权重 PU 正则
 
 实现类 nnPUCEWithReg(prior=0.3, lam=0.5) 保持所给公式：

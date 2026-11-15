@@ -85,7 +85,7 @@ def test_complete_suite_scores_all_arms_and_oracle_never_fits_fake_rows(tmp_path
     config_path.write_text(json.dumps(config))
     manifest = {"base": {"config_path": str(tmp_path / "native/train_config.json"), "checkpoint": "B0.pth"}}
     audit = {"statistic_mode": "video_mean"}
-    monkeypatch.setattr(ablations, "context", lambda *args: (
+    monkeypatch.setattr(ablations, "context", lambda *args, **kwargs: (
         run, manifest, config_path, config, audit, cache, {"compression_deltas": np.eye(10) * np.sqrt(.1 * 10)}, {}, main, identity, {"tau_R": .3}))
     monkeypatch.setattr(ablations, "arcface_path", lambda model: None)
     monkeypatch.setattr(ablations, "_real_groups", lambda audit, lookup, split: real if split == "fit" else rad)
@@ -180,6 +180,79 @@ def test_d5_development_only_and_missing_identity_weights_are_explicit(tmp_path,
     monkeypatch.setattr(diagnostics, "arcface_path", lambda path: None)
     result = diagnostics.identity_audit(tmp_path, {})
     assert result["status"] == "UNAVAILABLE_ARCFACE_WEIGHTS" and result["passed"] is None
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_missing_fit_cache_is_rebuilt_atomically_without_rewriting_completed_run(tmp_path, monkeypatch, matching):
+    run = tmp_path / "completed"
+    run.mkdir()
+    checkpoint, config = tmp_path / "B0.pth", run / "resolved_base_config.json"
+    checkpoint.write_bytes(b"original frozen B0")
+    config.write_text("{}")
+    expected = {"checkpoint_sha256": file_digest(checkpoint), "base_config_sha256": file_digest(config), "d8": True}
+    manifest = {"base": {"checkpoint": str(checkpoint)}, "status": "DEVELOPMENT_COMPLETE"}
+    manifest_path = run / "all_results.json"
+    manifest_path.write_text(json.dumps(manifest))
+    original_manifest = manifest_path.read_bytes()
+    calls = []
+    def extract(audit, cfg, ckpt, clip, output, **kwargs):
+        assert audit == run / "audit/audit.json" and cfg == config and ckpt == str(checkpoint)
+        assert clip == "original_clip" and kwargs == {"device": "cuda:0", "batch_size": 8, "d8": True}
+        assert output != run / "features/features.npz"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"reconstructed feature snapshot")
+        calls.append(output)
+    monkeypatch.setattr(ablations, "extract", extract)
+    monkeypatch.setattr(ablations, "load_cache", lambda path, audit: ({}, expected if matching else {"changed": True}, {}))
+    arguments = (run, tmp_path / "deleted-run/features/features.npz", manifest, config,
+                 {"clip_pretrained_path": "original_clip"}, {}, {"feature_identity": expected}, "cuda:0")
+    if matching:
+        path = ablations.recover_fit_cache(*arguments)
+        assert path == run / "features/features.npz" and path.read_bytes() == b"reconstructed feature snapshot"
+        assert not calls[0].exists()
+        assert json.loads((path.parent / "recovery.json").read_text())["feature_identity"] == expected
+    else:
+        with pytest.raises(ValueError, match="identity differs"):
+            ablations.recover_fit_cache(*arguments)
+        assert not (run / "features/features.npz").exists()
+    assert len(calls) == 1 and manifest_path.read_bytes() == original_manifest
+
+
+@pytest.mark.parametrize("changed", ["checkpoint_sha256", "base_config_sha256"])
+def test_fit_cache_recovery_refuses_changed_original_inputs(tmp_path, monkeypatch, changed):
+    checkpoint, config = tmp_path / "B0.pth", tmp_path / "base.json"
+    checkpoint.write_bytes(b"B0")
+    config.write_text("{}")
+    expected = {"checkpoint_sha256": file_digest(checkpoint), "base_config_sha256": file_digest(config), "d8": False}
+    expected[changed] = "different original input"
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Changed frozen inputs must be rejected before model execution")
+    monkeypatch.setattr(ablations, "extract", forbidden)
+    with pytest.raises(ValueError, match="original B0 or resolved configuration changed"):
+        ablations.recover_fit_cache(tmp_path, tmp_path / "missing.npz", {"base": {"checkpoint": str(checkpoint)}},
+                                   config, {}, {}, {"feature_identity": expected}, "cuda:0")
+
+
+def test_context_uses_already_recovered_local_cache_instead_of_missing_link(tmp_path, monkeypatch):
+    (tmp_path / "features").mkdir()
+    (tmp_path / "s0").mkdir()
+    local = tmp_path / "features/features.npz"
+    local.write_bytes(b"previously recovered cache")
+    (tmp_path / "resolved_base_config.json").write_text("{}")
+    (tmp_path / "s0/s0.json").write_text('{"tau_R": 0.3}')
+    (tmp_path / "all_results.json").write_text(json.dumps({"stages": {"features": {"cache_path": str(tmp_path / "deleted/cache.npz")}}}))
+    identity = {"audit_sha256": "same-audit", "feature_identity": {"frozen": True}, "thresholds": {}, "status": "S0_PASS"}
+    monkeypatch.setattr(ablations, "load_audit", lambda path: {"audit_sha256": "same-audit"})
+    monkeypatch.setattr(ablations, "load_metric", lambda path: ({}, identity))
+    paths = []
+    def load(path, audit):
+        paths.append(path)
+        return {}, identity["feature_identity"], {}
+    monkeypatch.setattr(ablations, "load_cache", load)
+    def forbidden(*args):
+        raise AssertionError("An already recovered local cache must not be rebuilt")
+    monkeypatch.setattr(ablations, "recover_fit_cache", forbidden)
+    assert ablations.context(tmp_path)[5] == local and paths == [local]
 
 
 def test_d6_uses_real_identity_embeddings_and_source_frozen_matching_cutoff(tmp_path, monkeypatch):
