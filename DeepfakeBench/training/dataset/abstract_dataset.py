@@ -229,7 +229,16 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
                 # Consider the case when the actual number of frames (e.g., 270) is larger than the specified (i.e., self.frame_num=32)
                 # In this case, we select self.frame_num frames from the original 270 frames
                 total_frames = len(frame_paths)
-                if self.frame_num < total_frames:
+                if self.mode == 'train' and self.config.get('e1115_frame_policy') == 'epoch_stratified':
+                    from e1115.sampling import select_frames
+                    if self.video_level:
+                        raise ValueError('E1115 frame coverage requires single-frame training')
+                    frame_paths = select_frames(
+                        frame_paths, self.frame_num, 'epoch_stratified',
+                        self.config['manualSeed'], self.config.get('e1115_epoch', 0),
+                        f'{dataset_name}/{unique_video_name}')
+                    total_frames = len(frame_paths)
+                elif self.frame_num < total_frames:
                     total_frames = self.frame_num
                     if self.video_level:
                         # Select clip_size continuous frames
@@ -526,6 +535,8 @@ class DeepfakeAbstractBaseDataset(data.Dataset):
                 # image_path = image_path.replace("frames", "frames_wocropface")
                 image = self.load_rgb(image_path)
             except Exception as e:
+                if self.config.get('e1115_strict_images', False):
+                    raise RuntimeError(f'E1115 cannot substitute unreadable image: {image_path}') from e
                 # Skip this image and return the first one
                 print(f"Error loading image at index {index}: {e}")
                 index_random = random.randint(0, len(self.image_list)-1)

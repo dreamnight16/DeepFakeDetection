@@ -72,6 +72,16 @@ def prepare_training_data(config):
         config=config,
         mode='train',
     )
+    if config.get('e1115_steps_per_epoch') is not None:
+        from e1115.sampling import FixedStepBatchSampler
+        if config.get('ddp') or config.get('use_mixup'):
+            raise ValueError('E1115 sampling requires single-GPU hard-label training')
+        sampler = FixedStepBatchSampler(
+            train_set.label_list, config['train_batchSize'], config['sampler_real_ratio'],
+            config['e1115_steps_per_epoch'], config['manualSeed'])
+        return torch.utils.data.DataLoader(
+            train_set, batch_sampler=sampler, num_workers=int(config['workers']),
+            collate_fn=train_set.collate_fn, persistent_workers=False)
     # ── Balanced batch sampler ────────────────────────────────────────────
     if config.get('balance_sampler_v2', False):
         # v2: explicit RF interleaved pairs [r1,f1, r2,f2, ..., rN,fN]
@@ -339,6 +349,9 @@ def main():
 
     # start training
     for epoch in range(config['start_epoch'], config['nEpochs'] + 1):
+        if config.get('e1115_steps_per_epoch') is not None:
+            from e1115.sampling import refresh_epoch
+            refresh_epoch(train_data_loader.dataset, train_data_loader.batch_sampler, epoch)
         trainer.model.epoch = epoch
         best_metric = trainer.train_epoch(
                     epoch=epoch,

@@ -318,6 +318,10 @@ class EffortDetector(nn.Module):
             'real_loss': loss_real,
             'fake_loss': loss_fake,
         }
+        if self.training and self.config.get('e1115_class_balanced_loss', False):
+            if 'label_soft' in data_dict or not (label == 0).any() or not (label == 1).any():
+                raise ValueError('E1115 class-mean CE requires both hard-label classes')
+            loss_dict['overall'] = .5 * (loss_real + loss_fake)
 
         if self.margin_loss_mode != 'off':
             margin_loss = self.asymmetric_center_loss(pred_dict['feat'], label)
