@@ -347,8 +347,16 @@ def main():
     # prepare the trainer
     trainer = Trainer(config, model, optimizer, scheduler, logger, metric_scoring)
 
+    e1119_record = config.get('e1119_record_dir')
+    if e1119_record:
+        from e1119_record import epoch_finished, train_started
+        train_started(config, trainer.model, train_data_loader, optimizer)
+
     # start training
     for epoch in range(config['start_epoch'], config['nEpochs'] + 1):
+        if e1119_record:
+            torch.cuda.reset_peak_memory_stats()
+            epoch_start = time.perf_counter()
         if config.get('e1115_steps_per_epoch') is not None:
             from e1115.sampling import refresh_epoch
             refresh_epoch(train_data_loader.dataset, train_data_loader.batch_sampler, epoch)
@@ -358,6 +366,8 @@ def main():
                     train_data_loader=train_data_loader,
                     test_data_loaders=test_data_loaders,
                 )
+        if e1119_record:
+            epoch_finished(config, trainer.model, epoch, time.perf_counter() - epoch_start, len(train_data_loader))
         if best_metric is not None:
             logger.info(f"===> Epoch[{epoch}] end with testing {metric_scoring}: {parse_metric_for_print(best_metric)}!")
     logger.info("Stop Training on best Testing metric {}".format(parse_metric_for_print(best_metric)))

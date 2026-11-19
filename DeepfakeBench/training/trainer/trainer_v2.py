@@ -1871,6 +1871,10 @@ class Trainer(object):
             # Save checkpoint, feature, and metrics if specified in config
             if self.config['save_ckpt'] and key not in FFpp_pool:
                 self.save_ckpt('test', key, f"{epoch}+{iteration}")
+                if self.config.get('e1119_record_dir') and key == 'avg':
+                    from e1119_record import best_selected
+                    best_selected(self.config, self.log_dir, key, epoch, iteration, step,
+                                  metric_one_dataset[self.metric_scoring])
             self.save_metrics('test', metric_one_dataset, key)
         if losses_one_dataset_recorder is not None:
             # info for each dataset
