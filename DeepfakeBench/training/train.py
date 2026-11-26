@@ -337,6 +337,9 @@ def main():
 
     # prepare the optimizer
     optimizer = choose_optimizer(model, config)
+    if config['model_name'] == 'effort_e1124':
+        from detectors.effort_detector_e1124 import register_projection_step
+        register_projection_step(model, optimizer)
 
     # prepare the scheduler
     scheduler = choose_scheduler(config, optimizer)

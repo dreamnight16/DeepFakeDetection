@@ -158,13 +158,15 @@ def worker_train(spec, destination, training):
     })
 
 
-def configs(spec, destination):
+def configs(spec, destination, *, model_override=None):
     root = Path(spec["run"])
     base = root / "baseline" / str(spec.get("seed", 1024))
     training, evaluation = (read(base / f"{phase}.json") for phase in ("train", "eval"))
     model = {}
     arm = spec.get("arm")
-    if arm and arm != "B00":
+    if model_override is not None:
+        model = model_override
+    elif arm and arm != "B00":
         model.update(model_name="effort_e1119", e1119_arm=arm)
     if spec.get("asset_folder"):
         kind = spec["asset_folder"] = Path(spec["asset_folder"])
@@ -301,9 +303,16 @@ def ready_for(key, dependencies, jobs):
     return False
 
 
-def schedule(folder, gpus, args):
-    graph = plan()
+def schedule(folder, gpus, args, *, graph=None, initial=None, entrypoint=__file__, task_factory=new_task,
+             validate_cached=None):
+    if graph is None:
+        graph = plan()
     jobs = {key: task_status(folder, key) for key in graph}
+    jobs.update(initial or {})
+    if validate_cached is not None:
+        for key, dependencies in graph.items():
+            if jobs[key]["status"] == "OK" and not validate_cached(key, dependencies, jobs):
+                jobs[key] = {"status": "PENDING"}
     slots = {}
     try:
         while True:
@@ -324,10 +333,10 @@ def schedule(folder, gpus, args):
             ready = [key for key, dependencies in graph.items()
                      if jobs[key]["status"] == "PENDING" and ready_for(key, dependencies, jobs)]
             for gpu, key in zip(free, ready):
-                destination = new_task(folder, key, graph[key], jobs, args)
+                destination = task_factory(folder, key, graph[key], jobs, args)
                 env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu, "PYTHONUNBUFFERED": "1"}
                 with (destination / "worker.log").open("w", encoding="utf-8") as log:
-                    process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                    process = subprocess.Popen([sys.executable, str(Path(entrypoint).resolve()),
                                                 "--worker", str(destination / "request.json")],
                                                cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
                                                start_new_session=os.name != "nt")

@@ -79,11 +79,12 @@ class TimedDetector:
 
 
 @torch.no_grad()
-def export_folded(model, folder, arm):
-    if arm in SPLIT:
+def export_folded(model, folder, arm, reference_blocks=None):
+    blocks = SPLIT.get(arm, ()) if reference_blocks is None else reference_blocks
+    if blocks:
         atomic_json(folder / "deployment.json", {"representation": "paired_detector_state",
-                    "reference_blocks": [i + 1 for i in SPLIT[arm]],
-                    "block_evaluations": 24 + len(SPLIT[arm])})
+                    "reference_blocks": [i + 1 for i in blocks],
+                    "block_evaluations": 24 + len(blocks)})
         return
     state = {key: value.detach().cpu() for key, value in model.state_dict().items()
              if key.startswith(("backbone.", "head."))}
@@ -118,7 +119,7 @@ def export_folded(model, folder, arm):
     atomic_json(folder / "deployment.json", metadata)
 
 
-def evaluate(config, model, folder, arm):
+def evaluate(config, model, folder, arm, *, reference_blocks=None):
     datasets = {}
     if arm in ("M01", "M02"):
         spectral = {}
@@ -138,7 +139,7 @@ def evaluate(config, model, folder, arm):
         atomic_json(folder / "matrix_diagnostics.json", {"projections": spectral,
                     **{key + "_mean": float(np.mean([v[key] for v in spectral.values()]))
                        for key in ("orth", "norm")}})
-    export_folded(model, folder, arm)
+    export_folded(model, folder, arm, reference_blocks)
     for name in TEST_DS:
         dest = folder / name
         dest.mkdir(parents=True, exist_ok=True)

@@ -25,5 +25,6 @@ from .effort_detector_e1025_soft import EffortDetectorE1025Soft
 from .effort_detector_e1025_pu import EffortDetectorE1025PU
 from .effort_detector_e1111b import EffortDetectorE1111B
 from .effort_detector_e1119 import EffortDetectorE1119
+from .effort_detector_e1124 import EffortDetectorE1124
 from .effort_detector_g26 import EffortDetectorG26
 from .effort_detector_g27 import EffortDetectorG27
